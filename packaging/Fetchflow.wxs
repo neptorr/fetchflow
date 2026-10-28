@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product
+    Id="*"
+    Name="Fetchflow"
+    Language="1033"
+    Version="1.1.0"
+    Manufacturer="Fetchflow"
+    UpgradeCode="6372B674-0871-4F2E-B96F-D2AE1840C77A">
+    <Package
+      InstallerVersion="500"
+      Compressed="yes"
+      InstallScope="perUser"
+      Platform="x64" />
+
+    <MajorUpgrade
+      DowngradeErrorMessage="A newer version of Fetchflow is already installed."
+      Schedule="afterInstallInitialize" />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Property Id="ARPPRODUCTICON" Value="FetchflowIcon" />
+    <Icon Id="FetchflowIcon" SourceFile="$(var.BuildDir)\Fetchflow.exe" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="LocalAppDataFolder">
+        <Directory Id="ProgramsFolder" Name="Programs">
+          <Directory Id="INSTALLFOLDER" Name="Fetchflow">
+            <Component Id="FetchflowApplication" Guid="D5D27939-7F97-4A66-AF13-85E058D22E53" Win64="yes">
+              <File Id="FetchflowExecutable" Source="$(var.BuildDir)\Fetchflow.exe" />
+              <RegistryValue
+                Root="HKCU"
+                Key="Software\Fetchflow"
+                Name="MsiInstallMarker"
+                Type="integer"
+                Value="1"
+                KeyPath="yes" />
+              <RemoveFolder Id="RemoveFetchflowInstallFolder" On="uninstall" />
+            </Component>
+            <Component Id="RemoveProgramsFolder" Guid="*" Win64="yes">
+              <RemoveFolder Id="RemoveProgramsFolderOnUninstall" Directory="ProgramsFolder" On="uninstall" />
+              <RegistryValue
+                Root="HKCU"
+                Key="Software\Fetchflow\Folders"
+                Name="ProgramsFolder"
+                Type="integer"
+                Value="1"
+                KeyPath="yes" />
+            </Component>
+          </Directory>
+        </Directory>
+      </Directory>
+
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ApplicationProgramsFolder" Name="Fetchflow">
+          <Component Id="FetchflowStartMenuShortcut" Guid="*" Win64="yes">
+            <Shortcut
+              Id="FetchflowStartMenuShortcut"
+              Name="Fetchflow"
+              Description="Fetchflow download manager"
+              Target="[INSTALLFOLDER]Fetchflow.exe"
+              WorkingDirectory="INSTALLFOLDER"
+              Advertise="no" />
+            <RemoveFolder Id="RemoveFetchflowStartMenuFolder" On="uninstall" />
+            <RegistryValue
+              Root="HKCU"
+              Key="Software\Fetchflow\Shortcuts"
+              Name="StartMenu"
+              Type="integer"
+              Value="1"
+              KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <Feature Id="MainFeature" Title="Fetchflow" Level="1">
+      <ComponentRef Id="FetchflowApplication" />
+      <ComponentRef Id="RemoveProgramsFolder" />
+      <ComponentRef Id="FetchflowStartMenuShortcut" />
+    </Feature>
+  </Product>
+</Wix>

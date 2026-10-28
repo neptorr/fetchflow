@@ -17,6 +17,7 @@ Get the latest installer from [Releases](https://github.com/neptorr/fetchflow/re
 - Set simultaneous-download, per-host, and speed limits. Snail mode caps the combined transfer speed at 10 or 50 KB/s.
 - Keep downloads running when the window is closed; Fetchflow moves to the notification area. Use the tray menu to reopen or exit.
 - Optionally start at Windows sign-in and resume the saved queue after a restart.
+- View link-check diagnostics and test HTTPS connectivity from the Logs tab.
 - Save downloads to a chosen folder and avoid overwriting existing files.
 
 ## Getting started
@@ -30,7 +31,7 @@ To resume the queue automatically after signing in to Windows, enable **Start wi
 
 ## Build from source
 
-Run `build-windows.ps1` in PowerShell. It builds the native app and a per-user installer with the .NET Framework C# compiler available on Windows. The app stores its queue and preferences in `%LOCALAPPDATA%\Fetchflow\state.json`; uninstalling preserves this data.
+Run `build-windows.ps1` in PowerShell. It builds the native app and a per-user installer with the .NET Framework C# compiler available on Windows. To build an MSI, install WiX Toolset 3.14.1, extract its binaries to `work\tooling\wix314`, then run `packaging\Build-Msi.ps1`. The app stores its queue and preferences in `%LOCALAPPDATA%\Fetchflow\state.json` and keeps a last-good recovery copy at `state.json.bak`; uninstalling preserves this data.
 
 The browser preview is separate from the Windows app. To run it from source, install Node.js 22 or later, run `npm start`, and open the local address printed in the terminal.
 

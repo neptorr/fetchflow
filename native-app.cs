@@ -10,8 +10,11 @@ using Microsoft.Win32;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Net.Sockets;
 using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -49,7 +52,9 @@ public sealed class NativeDownload
     [DataMember(Name="lastModified")] public string LastModified { get; set; }
     [DataMember(Name="segmentedMode")] public bool SegmentedMode { get; set; }
     [DataMember(Name="completedRanges")] public List<long[]> CompletedRanges { get; set; }
-    [IgnoreDataMember] public long CurrentSpeed { get; set; }
+    [IgnoreDataMember] public long CurrentSpeed;
+    [IgnoreDataMember] public long SpeedSampleBytes;
+    [IgnoreDataMember] public long SpeedLastSampleTimestamp;
 }
 
 [DataContract]
@@ -73,13 +78,60 @@ public sealed class GrabResult
 
 internal static class NativeProgram
 {
+    private const int SwRestore = 9;
+    private static readonly uint ActivateMessage = RegisterWindowMessage("Fetchflow.ActivateExistingInstance");
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr FindWindow(string className, string windowName);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern uint RegisterWindowMessage(string message);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindowAsync(IntPtr window, int command);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr window);
+
+    internal static uint ExistingInstanceMessage { get { return ActivateMessage; } }
+
     [STAThread]
     private static void Main()
     {
-        ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
-        Application.EnableVisualStyles();
-        Application.SetCompatibleTextRenderingDefault(false);
-        Application.Run(new NativeMainForm());
+        bool createdNew;
+        string userId = WindowsIdentity.GetCurrent().User.Value;
+        using (Mutex singleInstance = new Mutex(true, "Local\\Fetchflow." + userId, out createdNew))
+        {
+            if (!createdNew)
+            {
+                ActivateExistingInstance();
+                return;
+            }
+
+            try
+            {
+                ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+                Application.Run(new NativeMainForm());
+            }
+            finally
+            {
+                singleInstance.ReleaseMutex();
+            }
+        }
+    }
+
+    private static void ActivateExistingInstance()
+    {
+        IntPtr window = FindWindow(null, "Fetchflow");
+        if (window == IntPtr.Zero) return;
+        SendMessage(window, ActivateMessage, IntPtr.Zero, IntPtr.Zero);
+        ShowWindowAsync(window, SwRestore);
+        SetForegroundWindow(window);
     }
 }
 
@@ -90,7 +142,9 @@ public sealed class NativeMainForm : Form
         ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Fetchflow")
         : Path.GetFullPath(Environment.GetEnvironmentVariable("FETCHFLOW_DATA_DIR"));
     private readonly string stateFile;
+    private readonly string logFile;
     private readonly object saveLock = new object();
+    private readonly object logLock = new object();
     private readonly object schedulerLock = new object();
     private readonly List<NativeDownload> downloads = new List<NativeDownload>();
     private readonly List<GrabResult> results = new List<GrabResult>();
@@ -118,7 +172,10 @@ public sealed class NativeMainForm : Form
     private Button removeSelectedButton;
     private Button deleteSelectedButton;
     private Button checkLinksButton;
+    private Button checkInternetButton;
     private Button addSelectedButton;
+    private RichTextBox logsBox;
+    private Label internetStatusLabel;
     private TextBox folderBox;
     private NumericUpDown concurrencyBox;
     private NumericUpDown perHostBox;
@@ -130,6 +187,8 @@ public sealed class NativeMainForm : Form
     private NotifyIcon trayIcon;
     private CheckBox resumeAtLoginBox;
     private bool exitRequested;
+    private string stateLoadProblem;
+    private bool stateRecoveredFromBackup;
 
     public NativeMainForm()
     {
@@ -141,8 +200,16 @@ public sealed class NativeMainForm : Form
         ForeColor = Color.FromArgb(220, 230, 235);
         Font = new Font("Segoe UI", 9F);
         stateFile = Path.Combine(appData, "state.json");
+        logFile = Path.Combine(appData, "fetchflow.log");
         LoadState();
         BuildInterface();
+        LoadLogHistory();
+        WriteLog("INFO", "Fetchflow started. Settings and download queue: " + stateFile);
+        if (stateLoadProblem != null)
+        {
+            string warning = stateLoadProblem;
+            BeginInvoke((Action)delegate { MessageBox.Show(this, warning + " See the Logs tab for details. Your existing state files were kept.", "Fetchflow data recovery", MessageBoxButtons.OK, MessageBoxIcon.Warning); });
+        }
         RenderDownloads();
         UpdateSnailButton();
         InitializeTrayIcon();
@@ -154,6 +221,16 @@ public sealed class NativeMainForm : Form
         {
             BeginInvoke((Action)delegate { StartQueue(); HideToTray(); });
         }
+    }
+
+    protected override void WndProc(ref Message message)
+    {
+        if ((uint)message.Msg == NativeProgram.ExistingInstanceMessage)
+        {
+            RestoreFromTray();
+            return;
+        }
+        base.WndProc(ref message);
     }
 
     private static HttpClient CreateHttpClient()
@@ -206,21 +283,48 @@ public sealed class NativeMainForm : Form
     {
         settings = new NativeSettings { Folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads"), Concurrency = 3, PerHost = 2, ConnectionsPerFile = 4, SpeedLimitKiB = 0, SnailModeKiB = 0 };
         Directory.CreateDirectory(appData);
-        try
+        NativeState saved = null;
+        string backupFile = stateFile + ".bak";
+        if (File.Exists(stateFile))
         {
-            using (FileStream input = File.OpenRead(stateFile))
-            {
-                NativeState saved = (NativeState)new DataContractJsonSerializer(typeof(NativeState)).ReadObject(input);
-                if (saved.Settings != null) settings = MergeSettings(settings, saved.Settings);
-                if (saved.Items != null) downloads.AddRange(saved.Items.Where(i => i != null && !String.IsNullOrWhiteSpace(i.Id)));
-            }
+            try { saved = ReadStateFile(stateFile); }
+            catch (Exception error) { WriteLog("ERROR", "Could not read saved settings/queue: " + error.Message); }
         }
-        catch { }
+        if (saved == null && File.Exists(backupFile))
+        {
+            try
+            {
+                saved = ReadStateFile(backupFile);
+                stateRecoveredFromBackup = true;
+                WriteLog("WARN", "Recovered settings and queue from the last-good backup: " + backupFile);
+            }
+            catch (Exception error) { WriteLog("ERROR", "Could not read the backup state file: " + error.Message); }
+        }
+        if (saved != null)
+        {
+            if (saved.Settings != null) settings = MergeSettings(settings, saved.Settings);
+            if (saved.Items != null) downloads.AddRange(saved.Items.Where(i => i != null && !String.IsNullOrWhiteSpace(i.Id)));
+        }
+        else if (File.Exists(stateFile) || File.Exists(backupFile))
+        {
+            stateLoadProblem = "Fetchflow found saved data but could not read it. It started with default settings; the original files were preserved.";
+            WriteLog("ERROR", stateLoadProblem);
+        }
         foreach (NativeDownload item in downloads)
         {
             if (item.Status == "downloading") item.Status = "paused";
             if (item.Status == "paused") item.Error = "Paused when Fetchflow closed.";
             if (item.CompletedRanges == null) item.CompletedRanges = new List<long[]>();
+        }
+    }
+
+    private static NativeState ReadStateFile(string path)
+    {
+        using (FileStream input = File.OpenRead(path))
+        {
+            NativeState state = (NativeState)new DataContractJsonSerializer(typeof(NativeState)).ReadObject(input);
+            if (state == null) throw new InvalidDataException("The state file is empty.");
+            return state;
         }
     }
 
@@ -261,7 +365,12 @@ public sealed class NativeMainForm : Form
             };
             string temp = stateFile + ".tmp";
             using (FileStream output = File.Create(temp)) new DataContractJsonSerializer(typeof(NativeState)).WriteObject(output, state);
-            if (File.Exists(stateFile)) File.Replace(temp, stateFile, null);
+            if (File.Exists(stateFile))
+            {
+                if (!stateRecoveredFromBackup) File.Copy(stateFile, stateFile + ".bak", true);
+                File.Replace(temp, stateFile, null);
+                stateRecoveredFromBackup = false;
+            }
             else File.Move(temp, stateFile);
         }
     }
@@ -284,12 +393,117 @@ public sealed class NativeMainForm : Form
         TabPage downloadsPage = new TabPage("Downloads") { BackColor = Color.FromArgb(17, 25, 34), ForeColor = ForeColor };
         TabPage grabPage = new TabPage("LinkGrabber") { BackColor = Color.FromArgb(17, 25, 34), ForeColor = ForeColor };
         TabPage settingsPage = new TabPage("Settings") { BackColor = Color.FromArgb(17, 25, 34), ForeColor = ForeColor };
-        tabs.TabPages.Add(downloadsPage); tabs.TabPages.Add(grabPage); tabs.TabPages.Add(settingsPage);
+        TabPage logsPage = new TabPage("Logs") { BackColor = Color.FromArgb(17, 25, 34), ForeColor = ForeColor };
+        tabs.TabPages.Add(downloadsPage); tabs.TabPages.Add(grabPage); tabs.TabPages.Add(settingsPage); tabs.TabPages.Add(logsPage);
         shell.Controls.Add(tabs, 0, 1);
         BuildDownloadsPage(downloadsPage);
         BuildGrabberPage(grabPage);
         BuildSettingsPage(settingsPage);
+        BuildLogsPage(logsPage);
         BuildContextMenu();
+    }
+
+    private void BuildLogsPage(TabPage page)
+    {
+        TableLayoutPanel layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Padding = new Padding(10) };
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        page.Controls.Add(layout);
+
+        FlowLayoutPanel toolbar = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
+        Label location = new Label { Text = "Logs saved in %LOCALAPPDATA%\\Fetchflow", AutoSize = true, ForeColor = Color.FromArgb(150, 169, 180), Padding = new Padding(3, 10, 8, 0) };
+        checkInternetButton = MakeButton("Check internet", async delegate { await CheckInternetAccess(); }, true);
+        internetStatusLabel = new Label { Text = "Internet status not checked", AutoSize = true, ForeColor = Color.FromArgb(150, 169, 180), Padding = new Padding(8, 10, 8, 0) };
+        Button copy = MakeButton("Copy logs", delegate { if (logsBox != null && logsBox.TextLength > 0) Clipboard.SetText(logsBox.Text); }, false);
+        Button clear = MakeButton("Clear logs", delegate { ClearLogs(); }, false);
+        toolbar.Controls.Add(checkInternetButton); toolbar.Controls.Add(internetStatusLabel); toolbar.Controls.Add(copy); toolbar.Controls.Add(clear); toolbar.Controls.Add(location);
+        layout.Controls.Add(toolbar, 0, 0);
+
+        logsBox = new RichTextBox { Dock = DockStyle.Fill, ReadOnly = true, DetectUrls = false, BackColor = Color.FromArgb(12, 18, 24), ForeColor = Color.FromArgb(205, 218, 225), BorderStyle = BorderStyle.FixedSingle, Font = new Font("Consolas", 9F), WordWrap = false };
+        layout.Controls.Add(logsBox, 0, 1);
+    }
+
+    private void LoadLogHistory()
+    {
+        try
+        {
+            if (!File.Exists(logFile)) return;
+            string[] lines = File.ReadAllLines(logFile);
+            int first = Math.Max(0, lines.Length - 1000);
+            for (int i = first; i < lines.Length; i++) AppendLogLine(lines[i]);
+        }
+        catch { }
+    }
+
+    private void WriteLog(string level, string message)
+    {
+        string line = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " [" + level + "] " + message;
+        lock (logLock)
+        {
+            try
+            {
+                Directory.CreateDirectory(appData);
+                File.AppendAllText(logFile, line + Environment.NewLine, Encoding.UTF8);
+            }
+            catch { }
+        }
+        if (IsDisposed || !IsHandleCreated) return;
+        if (InvokeRequired) BeginInvoke((Action)delegate { AppendLogLine(line); });
+        else AppendLogLine(line);
+    }
+
+    private void AppendLogLine(string line)
+    {
+        if (logsBox == null || logsBox.IsDisposed) return;
+        logsBox.AppendText(line + Environment.NewLine);
+        logsBox.SelectionStart = logsBox.TextLength;
+        logsBox.ScrollToCaret();
+    }
+
+    private void ClearLogs()
+    {
+        if (logsBox != null) logsBox.Clear();
+        lock (logLock)
+        {
+            try { File.WriteAllText(logFile, String.Empty, Encoding.UTF8); }
+            catch (Exception error) { WriteLog("ERROR", "Could not clear the log file: " + error.Message); }
+        }
+    }
+
+    private async Task CheckInternetAccess()
+    {
+        Uri checkUri = new Uri("https://www.microsoft.com/");
+        checkInternetButton.Enabled = false;
+        internetStatusLabel.Text = "Checking HTTPS access…";
+        Stopwatch watch = Stopwatch.StartNew();
+        bool timedOut = false;
+        string failure = null;
+        WriteLog("INFO", "Checking general internet access over HTTPS.");
+        try
+        {
+            using (CancellationTokenSource timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
+            using (HttpRequestMessage request = new HttpRequestMessage(HttpMethod.Get, checkUri))
+            using (HttpResponseMessage response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token))
+            {
+                internetStatusLabel.Text = "HTTPS reachable · HTTP " + (int)response.StatusCode;
+                WriteLog("INFO", "Internet check succeeded: " + checkUri.Host + " returned HTTP " + (int)response.StatusCode + " in " + watch.Elapsed.TotalSeconds.ToString("0.0") + " seconds.");
+            }
+        }
+        catch (OperationCanceledException) { timedOut = true; }
+        catch (Exception error) { failure = "Internet check failed (" + error.GetType().Name + "): " + error.Message; }
+
+        if (timedOut)
+        {
+            string detail = await DiagnoseHost(checkUri);
+            internetStatusLabel.Text = "HTTPS check timed out";
+            WriteLog("WARN", "Internet check timed out after " + watch.Elapsed.TotalSeconds.ToString("0") + " seconds. " + detail);
+        }
+        else if (failure != null)
+        {
+            internetStatusLabel.Text = "HTTPS check failed";
+            WriteLog("ERROR", failure);
+        }
+        checkInternetButton.Enabled = true;
     }
 
     private Button MakeButton(string text, EventHandler click, bool primary)
@@ -509,10 +723,28 @@ public sealed class NativeMainForm : Form
             downloadGrid.Rows[i].Cells[2].Value = FormatBytes(item.Size);
             downloadGrid.Rows[i].Cells[4].Value = StatusText(item);
             downloadGrid.Rows[i].Cells[5].Value = ProgressText(item);
-            totalSpeed += Math.Max(0, item.CurrentSpeed);
+            totalSpeed += Math.Max(0, SampleCurrentSpeed(item));
         }
         speedSummary.Text = FormatBytes(totalSpeed) + "/s";
         UpdateSelectionUi();
+    }
+
+    private static void RecordSpeedBytes(NativeDownload item, int bytes)
+    {
+        Interlocked.Add(ref item.SpeedSampleBytes, bytes);
+    }
+
+    private static long SampleCurrentSpeed(NativeDownload item)
+    {
+        long now = Stopwatch.GetTimestamp();
+        long previous = Interlocked.Exchange(ref item.SpeedLastSampleTimestamp, now);
+        if (previous == 0) return Interlocked.Read(ref item.CurrentSpeed);
+        long elapsedTicks = now - previous;
+        long transferred = Interlocked.Exchange(ref item.SpeedSampleBytes, 0);
+        if (elapsedTicks <= 0) return Interlocked.Read(ref item.CurrentSpeed);
+        long bytesPerSecond = (long)(transferred * (double)Stopwatch.Frequency / elapsedTicks);
+        Interlocked.Exchange(ref item.CurrentSpeed, Math.Max(0, bytesPerSecond));
+        return Interlocked.Read(ref item.CurrentSpeed);
     }
 
     private void UpdateSelectionUi()
@@ -719,7 +951,7 @@ public sealed class NativeMainForm : Form
                     await output.WriteAsync(buffer, 0, read, cancel);
                     position += read; active[slot] = position - start; throttledBytes += read;
                     lock (item) item.Bytes = CountRanges(item.CompletedRanges) + active.Sum();
-                    item.CurrentSpeed = read * 1000L / Math.Max(1, watch.ElapsedMilliseconds);
+                    RecordSpeedBytes(item, read);
                     Throttle(watch, throttledBytes, Math.Max(1, Math.Min(settings.ConnectionsPerFile, running.Count)), cancel);
                 }
                 await output.FlushAsync(cancel);
@@ -774,7 +1006,7 @@ public sealed class NativeMainForm : Form
                     int read = await input.ReadAsync(buffer, 0, buffer.Length, cancel);
                     if (read == 0) break;
                     await output.WriteAsync(buffer, 0, read, cancel);
-                    bytes += read; item.Bytes = offset + bytes; item.CurrentSpeed = read * 1000L / Math.Max(1, watch.ElapsedMilliseconds);
+                    bytes += read; item.Bytes = offset + bytes; RecordSpeedBytes(item, read);
                     Throttle(watch, bytes, 1, cancel);
                 }
                 await output.FlushAsync(cancel);
@@ -802,46 +1034,148 @@ public sealed class NativeMainForm : Form
         if (urls.Count == 0) { MessageBox.Show(this, "Paste one or more direct file links first.", "LinkGrabber", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
         if (urls.Count > 80) { MessageBox.Show(this, "Check up to 80 links at a time.", "LinkGrabber", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
         checkLinksButton.Enabled = false; checkLinksButton.Text = "Checking…";
+        results.Clear();
+        RenderGrabber();
+        WriteLog("INFO", "Starting link check for " + urls.Count + " link(s). Up to 8 links are checked at once; each request times out after 20 seconds.");
         try
         {
-            List<Task<GrabResult>> tasks = urls.Select(url => InspectLink(url)).ToList();
-            results.Clear(); results.AddRange(await Task.WhenAll(tasks));
+            using (SemaphoreSlim limit = new SemaphoreSlim(8))
+            {
+                int completed = 0;
+                List<Task<GrabResult>> tasks = urls.Select(async url =>
+                {
+                    await limit.WaitAsync();
+                    try { return await InspectLink(url); }
+                    finally
+                    {
+                        limit.Release();
+                        int finished = Interlocked.Increment(ref completed);
+                        if (checkLinksButton != null && !checkLinksButton.IsDisposed) checkLinksButton.Text = "Checking " + finished + "/" + urls.Count + "…";
+                    }
+                }).ToList();
+                results.AddRange(await Task.WhenAll(tasks));
+            }
             RenderGrabber();
+            int succeeded = results.Count(r => r.Selected && String.IsNullOrEmpty(r.Error));
+            int failed = results.Count - succeeded;
+            WriteLog("INFO", "Link check finished: " + succeeded + " available, " + failed + " unavailable or timed out.");
         }
+        catch (Exception error) { WriteLog("ERROR", "Link check failed: " + error.GetType().Name + ": " + error.Message); }
         finally { checkLinksButton.Enabled = true; checkLinksButton.Text = "⌕  Check links"; }
     }
 
     private async Task<GrabResult> InspectLink(string value)
     {
         GrabResult result = new GrabResult { Url = value };
+        CancellationTokenSource timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        Stopwatch watch = Stopwatch.StartNew();
+        Uri uri = null;
+        string stage = "URL validation";
+        bool timedOut = false;
         try
         {
-            Uri uri = ValidateUri(value); result.Host = uri.Host;
-            using (HttpRequestMessage headRequest = new HttpRequestMessage(HttpMethod.Head, uri))
-            using (HttpResponseMessage head = await Http.SendAsync(headRequest, HttpCompletionOption.ResponseHeadersRead))
+            uri = ValidateUri(value); result.Host = uri.Host;
+            string httpStatus = String.Empty;
+            bool needsProbe = true;
+            WriteLog("INFO", "Checking " + uri.Host + ": sending HEAD request.");
+            using (CancellationTokenSource headTimeout = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token))
             {
-                result.Size = head.Content.Headers.ContentLength ?? 0;
-                result.Filename = ResponseFilename(head, uri);
-                result.Ranges = head.Headers.AcceptRanges.Any(r => r.Equals("bytes", StringComparison.OrdinalIgnoreCase));
-                bool needsProbe = String.IsNullOrWhiteSpace(result.Filename) || String.IsNullOrEmpty(Path.GetExtension(result.Filename)) || !head.IsSuccessStatusCode;
-                if (needsProbe)
+                headTimeout.CancelAfter(TimeSpan.FromSeconds(8));
+                try
                 {
-                    using (HttpResponseMessage probe = await GetRange(value, 0, 0, null, CancellationToken.None))
+                    stage = "HEAD response";
+                    using (HttpRequestMessage headRequest = new HttpRequestMessage(HttpMethod.Head, uri))
+                    using (HttpResponseMessage head = await Http.SendAsync(headRequest, HttpCompletionOption.ResponseHeadersRead, headTimeout.Token))
                     {
-                        string probedName = ResponseFilename(probe, new Uri(probe.RequestMessage.RequestUri.ToString()));
-                        if (!String.IsNullOrWhiteSpace(probedName)) result.Filename = probedName;
-                        if (probe.Content.Headers.ContentRange != null && probe.Content.Headers.ContentRange.Length.HasValue) result.Size = probe.Content.Headers.ContentRange.Length.Value;
-                        result.Ranges = result.Ranges || probe.StatusCode == HttpStatusCode.PartialContent || probe.Headers.AcceptRanges.Any(r => r.Equals("bytes", StringComparison.OrdinalIgnoreCase));
-                        result.Selected = probe.IsSuccessStatusCode || probe.StatusCode == HttpStatusCode.PartialContent;
+                        WriteLog("INFO", uri.Host + ": HEAD returned HTTP " + (int)head.StatusCode + " in " + watch.Elapsed.TotalSeconds.ToString("0.0") + " seconds.");
+                        if (!head.IsSuccessStatusCode) httpStatus = (int)head.StatusCode + " " + head.ReasonPhrase;
+                        result.Size = head.Content.Headers.ContentLength ?? 0;
+                        result.Filename = ResponseFilename(head, uri);
+                        result.Ranges = head.Headers.AcceptRanges.Any(r => r.Equals("bytes", StringComparison.OrdinalIgnoreCase));
+                        needsProbe = String.IsNullOrWhiteSpace(result.Filename) || String.IsNullOrEmpty(Path.GetExtension(result.Filename)) || !head.IsSuccessStatusCode;
+                        if (!needsProbe) result.Selected = true;
                     }
                 }
-                else result.Selected = head.IsSuccessStatusCode;
-                if (String.IsNullOrWhiteSpace(result.Filename)) result.Filename = FileNameFromUri(uri);
-                if (!result.Selected) result.Error = "Unavailable";
+                catch (OperationCanceledException)
+                {
+                    if (timeout.IsCancellationRequested) throw;
+                    needsProbe = true;
+                    WriteLog("WARN", uri.Host + ": HEAD did not respond within 8 seconds; trying a range GET instead.");
+                }
+            }
+
+            if (needsProbe)
+            {
+                stage = "range GET fallback";
+                WriteLog("INFO", uri.Host + ": sending a one-byte range GET fallback.");
+                using (HttpResponseMessage probe = await GetRange(value, 0, 0, null, timeout.Token))
+                {
+                    WriteLog("INFO", uri.Host + ": range GET returned HTTP " + (int)probe.StatusCode + " in " + watch.Elapsed.TotalSeconds.ToString("0.0") + " seconds.");
+                    if (!probe.IsSuccessStatusCode && probe.StatusCode != HttpStatusCode.PartialContent) httpStatus = (int)probe.StatusCode + " " + probe.ReasonPhrase;
+                    Uri responseUri = probe.RequestMessage == null || probe.RequestMessage.RequestUri == null ? uri : probe.RequestMessage.RequestUri;
+                    string probedName = ResponseFilename(probe, responseUri);
+                    if (!String.IsNullOrWhiteSpace(probedName)) result.Filename = probedName;
+                    if (probe.Content.Headers.ContentRange != null && probe.Content.Headers.ContentRange.Length.HasValue) result.Size = probe.Content.Headers.ContentRange.Length.Value;
+                    result.Ranges = result.Ranges || probe.StatusCode == HttpStatusCode.PartialContent || probe.Headers.AcceptRanges.Any(r => r.Equals("bytes", StringComparison.OrdinalIgnoreCase));
+                    result.Selected = probe.IsSuccessStatusCode || probe.StatusCode == HttpStatusCode.PartialContent;
+                }
+            }
+            if (String.IsNullOrWhiteSpace(result.Filename)) result.Filename = FileNameFromUri(uri);
+            if (!result.Selected) result.Error = "Unavailable" + (String.IsNullOrEmpty(httpStatus) ? String.Empty : " (HTTP " + httpStatus + ")");
+        }
+        catch (OperationCanceledException)
+        {
+            timedOut = true;
+            result.Error = "Timed out during " + stage + " after " + watch.Elapsed.TotalSeconds.ToString("0") + " seconds.";
+        }
+        catch (Exception error)
+        {
+            result.Error = stage + " failed (" + error.GetType().Name + "): " + error.Message;
+            if (!String.IsNullOrWhiteSpace(value))
+            {
+                int urlIndex = result.Error.IndexOf(value, StringComparison.OrdinalIgnoreCase);
+                if (urlIndex >= 0) result.Error = result.Error.Substring(0, urlIndex) + "link" + result.Error.Substring(urlIndex + value.Length);
             }
         }
-        catch (Exception error) { result.Error = error.Message; }
+        finally { timeout.Dispose(); }
+        if (timedOut && uri != null)
+        {
+            string diagnostics = await DiagnoseHost(uri);
+            if (!String.IsNullOrEmpty(diagnostics)) result.Error += " " + diagnostics;
+        }
+        WriteLog(String.IsNullOrEmpty(result.Error) ? "INFO" : "WARN", "Check " + (String.IsNullOrWhiteSpace(result.Host) ? "link" : result.Host) + ": " + (String.IsNullOrEmpty(result.Error) ? "available" : result.Error));
         return result;
+    }
+
+    private async Task<string> DiagnoseHost(Uri uri)
+    {
+        IPAddress[] addresses;
+        try
+        {
+            Task<IPAddress[]> lookup = Task.Run(() => Dns.GetHostAddresses(uri.Host));
+            if (await Task.WhenAny(lookup, Task.Delay(3000)) != lookup) return "DNS lookup is still pending after 3 seconds.";
+            addresses = await lookup;
+            if (addresses == null || addresses.Length == 0) return "DNS returned no IP addresses.";
+            WriteLog("INFO", uri.Host + ": DNS resolved to " + addresses.Length + " address(es).");
+        }
+        catch (Exception error) { return "DNS lookup failed: " + error.GetType().Name + " - " + error.Message; }
+
+        using (TcpClient client = new TcpClient())
+        {
+            try
+            {
+                Task connect = Task.Factory.FromAsync(client.BeginConnect(addresses, uri.Port, null, null), client.EndConnect);
+                if (await Task.WhenAny(connect, Task.Delay(3000)) != connect)
+                {
+                    client.Close();
+                    return "DNS resolved, but TCP port " + uri.Port + " did not connect within 3 seconds.";
+                }
+                await connect;
+                WriteLog("INFO", uri.Host + ": TCP port " + uri.Port + " is reachable.");
+                return "DNS and TCP port " + uri.Port + " are reachable; the delay is likely in TLS or the HTTP response, or the host is filtering the request.";
+            }
+            catch (Exception error) { return "DNS resolved, but TCP port " + uri.Port + " failed: " + error.GetType().Name + " - " + error.Message; }
+        }
     }
 
     private void AddSelectedLinks()

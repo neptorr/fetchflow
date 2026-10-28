@@ -1,6 +1,8 @@
 /work/
 /Fetchflow.exe
 /Fetchflow-Setup.exe
+/Fetchflow.msi
+/Fetchflow.wixpdb
 /node_modules/
 *.pdb
 *.user
