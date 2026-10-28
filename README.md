@@ -1,40 +1,40 @@
-# Fetchflow
+# Fetchflow Download Manager
 
-Fetchflow is a Windows download manager for direct HTTP and HTTPS file links. Add links to LinkGrabber, inspect the files, then manage transfers from one queue.
-
-The desktop app is a native Windows application. It does not need Node.js, a browser window, or a local server.
+Fetchflow is a native Windows download manager for direct HTTP and HTTPS links and public YouTube videos. It does not need a browser window or a local web server.
 
 ## Download
 
-Get the latest installer from [Releases](https://github.com/neptorr/fetchflow/releases/latest). Run `Fetchflow-Setup.exe` to install for your Windows account. The installer adds a Start menu shortcut and an uninstall entry. You can also download `Fetchflow.exe` from the release for portable use.
+Download the Windows MSI installer from [GitHub Releases](https://github.com/neptorr/fetchflow/releases/latest). Run the MSI to install Fetchflow for your Windows account. The installer adds a Start menu shortcut and an uninstall entry.
 
 ## Features
 
-- Inspect direct links before adding them, including the server-provided filename, size, host, and byte-range support.
-- Queue multiple downloads, select several at once, and pause, resume, retry, or remove items.
-- Resume partial downloads and use multiple connections when the server supports safe byte ranges.
-- Replace an expired link and verify that it points to the same file before continuing a partial download.
-- Set simultaneous-download, per-host, and speed limits. Snail mode caps the combined transfer speed at 10 or 50 KB/s.
-- Keep downloads running when the window is closed; Fetchflow moves to the notification area. Use the tray menu to reopen or exit.
-- Optionally start at Windows sign-in and resume the saved queue after a restart.
-- View link-check diagnostics and test HTTPS connectivity from the Logs tab.
+- Check direct links before downloading, including the filename, size, host, and byte-range support reported by the server.
+- Paste a public YouTube video URL in **LinkGrabber** to view available video resolutions and audio formats before adding a download to the queue.
+- Choose a video or audio format, then add the selected item to the download queue. Audio can be saved as MP3 at the available bitrates.
+- Queue multiple downloads and pause, resume, retry, or remove items. Resume partial direct-file downloads when the server supports byte ranges.
+- Use multiple connections for direct-file downloads when the server supports safe byte ranges.
+- Replace an expired direct link and verify that it points to the same file before continuing a partial download.
+- Set simultaneous-download, per-host, and speed limits. Snail mode caps combined transfer speed at 10 or 50 KB/s.
+- Keep downloads running in the notification area when the window is closed, and optionally resume the queue after signing in to Windows.
+- Review link-check diagnostics and test HTTPS connectivity from the **Logs** tab.
 - Save downloads to a chosen folder and avoid overwriting existing files.
+
+YouTube format availability depends on the video. Fetchflow uses yt-dlp to inspect and download selected formats; it retrieves the official yt-dlp helper and verifies its checksum when needed. FFmpeg is included with the MSI for merging video and audio streams and converting audio to MP3.
 
 ## Getting started
 
-1. Install Fetchflow and open it from the Start menu.
-2. Open **LinkGrabber**, paste one direct HTTP or HTTPS URL per line, and choose **Check links**.
-3. Select the files you want and add them to the queue.
-4. Choose **Start queue** when you’re ready.
+1. Install Fetchflow from the MSI and open **Fetchflow Download Manager** from the Start menu.
+2. Open **LinkGrabber** and paste one or more direct HTTP/HTTPS links or a public YouTube video URL.
+3. Select **Check links**. For YouTube, wait for available formats to load and choose the video or audio quality you want.
+4. Select the items to add to the queue, then choose **Start queue** when ready.
 
-To resume the queue automatically after signing in to Windows, enable **Start with Windows and resume queued downloads at sign-in** in Settings. This setting is off by default.
+Settings and the download queue are saved on this device. To resume queued downloads automatically after signing in to Windows, enable **Start with Windows and resume queued downloads at sign-in** in Settings.
 
-## Build from source
+## License
 
-Run `build-windows.ps1` in PowerShell. It builds the native app and a per-user installer with the .NET Framework C# compiler available on Windows. To build an MSI, install WiX Toolset 3.14.1, extract its binaries to `work\tooling\wix314`, then run `packaging\Build-Msi.ps1`. The app stores its queue and preferences in `%LOCALAPPDATA%\Fetchflow\state.json` and keeps a last-good recovery copy at `state.json.bak`; uninstalling preserves this data.
-
-The browser preview is separate from the Windows app. To run it from source, install Node.js 22 or later, run `npm start`, and open the local address printed in the terminal.
+Fetchflow is distributed under the [PolyForm Noncommercial License 1.0.0](LICENSE). It allows personal and other noncommercial use; commercial use is not permitted under its terms. Third-party components retain their own licenses; see the notices installed with Fetchflow.
 
 ## Download limits
 
-Fetchflow handles direct HTTP and HTTPS file URLs. Links that require a website login, a browser session, or a site-specific resolver may not be downloadable. Link inspection contacts the URL’s server when you choose **Check links**; transfers begin only when you start the queue.
+Fetchflow supports direct HTTP/HTTPS file links and public YouTube videos. Links that require a website login, an authenticated browser session, or a site-specific resolver may not be downloadable. Link inspection contacts the URL’s server when you choose **Check links**; transfers begin only when you start the queue.
+
