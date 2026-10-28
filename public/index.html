@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0e141c">
+  <title>Fetchflow</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/bulk.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark"><i></i><i></i><i></i></span><span>fetchflow</span></div>
+      <div class="workspace-label">WORKSPACE</div>
+      <nav class="nav-list" aria-label="Main navigation">
+        <button class="nav-item active" data-view="downloads"><span class="nav-icon">↓</span><span>Downloads</span><span id="download-count" class="nav-count">0</span></button>
+        <button class="nav-item" data-view="grabber"><span class="nav-icon">⌁</span><span>LinkGrabber</span><span id="grabber-count" class="nav-count muted-count">0</span></button>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="sidebar-card">
+          <span class="pulse-dot"></span>
+          <div><strong id="connection-label">Ready to download</strong><small>Direct HTTP · HTTPS</small></div>
+        </div>
+        <button class="nav-item settings-link" data-view="settings"><span class="nav-icon">⚙</span><span>Settings</span></button>
+        <div class="sidebar-foot">LOCAL SESSION <span>● PRIVATE</span></div>
+      </div>
+    </aside>
+
+    <main class="main-area">
+      <header class="topbar">
+        <div class="breadcrumb"><span>Workspace</span><b>/</b><strong id="view-crumb">Downloads</strong></div>
+        <div class="top-actions"><div class="local-badge"><span></span> Running locally</div><button id="refresh-button" class="icon-button" title="Refresh queue" aria-label="Refresh queue">↻</button><div class="avatar">F</div></div>
+      </header>
+
+      <section class="view-panel active" id="view-downloads">
+        <div class="page-heading">
+          <div><div class="eyebrow">YOUR TRANSFERS</div><h1>Downloads <span class="heading-dot">.</span></h1><p class="lede">Keep every file moving, in one place.</p></div>
+          <div class="heading-actions"><button class="button button-secondary snail-mode-button" id="snail-mode-button" title="Cycle through off, 10 KB/s, and 50 KB/s">🐌 Snail: Off</button><button class="button button-secondary" id="pause-all-button"><span>Ⅱ</span> Pause all</button><button class="button button-primary" id="start-all-button"><span>▶</span> Start queue</button></div>
+        </div>
+        <div class="stats-grid">
+          <article class="stat-card"><div class="stat-label">ACTIVE</div><div class="stat-value" id="stat-active">0 <span>downloads</span></div><div class="stat-foot"><i class="status-dot green"></i><span id="stat-active-foot">All caught up</span></div></article>
+          <article class="stat-card"><div class="stat-label">TOTAL SPEED</div><div class="stat-value" id="stat-speed">0 <span>KB/s</span></div><div class="stat-foot"><span class="stat-symbol">↗</span><span>Across active transfers</span></div></article>
+          <article class="stat-card"><div class="stat-label">IN QUEUE</div><div class="stat-value" id="stat-queued">0 <span>files</span></div><div class="stat-foot"><span class="stat-symbol">◷</span><span id="stat-remaining">Waiting to start</span></div></article>
+          <article class="stat-card"><div class="stat-label">COMPLETED</div><div class="stat-value" id="stat-completed">0 <span>files</span></div><div class="stat-foot"><i class="status-dot green"></i><span>Ready in your folder</span></div></article>
+        </div>
+        <div class="section-toolbar">
+          <div class="tabs"><button class="filter-tab selected" data-filter="all">All <span id="filter-all-count">0</span></button><button class="filter-tab" data-filter="downloading">Active</button><button class="filter-tab" data-filter="queued">Queued</button><button class="filter-tab" data-filter="finished">Completed</button></div>
+          <div class="list-tools"><div class="bulk-remove-tools" id="download-bulk-actions" hidden><span id="selected-download-count">0 selected</span><button class="button button-secondary" id="remove-selected-downloads">Remove selected</button><button class="button button-danger" id="delete-selected-files" disabled>Delete files…</button></div><label class="search-box"><span>⌕</span><input id="search-input" placeholder="Search downloads" autocomplete="off"></label><button class="icon-button" id="sort-button" title="Sort by recent">↕</button></div>
+        </div>
+        <div class="table-card">
+          <div class="table-head"><span class="col-select"><input id="select-all-downloads" type="checkbox" aria-label="Select all visible downloads"></span><span class="col-name">FILE NAME</span><span class="col-size">SIZE</span><span class="col-host">SOURCE</span><span class="col-status">STATUS</span><span class="col-progress">PROGRESS</span><span class="col-action"></span></div>
+          <div id="download-list" class="download-list"></div>
+          <div id="empty-downloads" class="empty-state"><div class="empty-art"><span>↓</span><i></i></div><h3>Your queue is clear</h3><p>Add a direct link to review it, then start your download.</p><button class="button button-primary" data-open-grabber>+ Add links</button></div>
+        </div>
+        <div class="list-footer"><span id="list-summary">0 downloads</span><span class="list-hint">Right-click a download to refresh its link</span><button id="clear-finished" class="text-button">Clear completed</button></div>
+      </section>
+
+      <section class="view-panel" id="view-grabber">
+        <div class="page-heading">
+          <div><div class="eyebrow">COLLECT & REVIEW</div><h1>LinkGrabber <span class="heading-dot">.</span></h1><p class="lede">Check direct links before they join your queue.</p></div>
+          <div class="heading-actions"><div class="review-hint"><span>↗</span> Checks may request a byte range to read the server's filename.</div></div>
+        </div>
+        <div class="grabber-composer">
+          <div class="composer-top"><div><span class="composer-icon">⌁</span><div><strong>Add links to review</strong><small>Paste one HTTP or HTTPS file link per line</small></div></div><span class="secure-label">LOCAL ONLY</span></div>
+          <textarea id="links-input" rows="5" spellcheck="false" placeholder="https://example.com/files/archive.zip&#10;https://cdn.example.net/video.mp4"></textarea>
+          <div class="composer-bottom"><span id="link-lines">0 links · Maximum 80</span><div><button id="clear-links" class="button button-quiet">Clear</button><button id="check-links" class="button button-primary"><span>⌕</span> Check links</button></div></div>
+        </div>
+        <div class="grabber-results-head"><div><div class="eyebrow">REVIEW</div><h2>Checked links <span id="result-count">0</span></h2></div><button class="button button-secondary" id="queue-selected" disabled>＋ Add selected to queue</button></div>
+        <div class="table-card grabber-card">
+          <div class="table-head"><span class="col-check"><input id="select-all-results" type="checkbox" aria-label="Select all links"></span><span class="col-name">FILE NAME</span><span class="col-host">HOST</span><span class="col-size">SIZE</span><span class="col-range">RESUME</span><span class="col-action"></span></div>
+          <div id="result-list" class="download-list"></div>
+          <div id="empty-results" class="empty-state compact"><div class="empty-art link-art"><span>⌁</span><i></i></div><h3>No links to review yet</h3><p>Paste direct file links above and check their availability.</p></div>
+        </div>
+        <p class="scope-note"><span>ⓘ</span> Fetchflow works with direct file links. Sites that require a special plugin, account, or browser session may not expose one.</p>
+      </section>
+
+      <section class="view-panel" id="view-settings">
+        <div class="page-heading"><div><div class="eyebrow">MAKE IT YOURS</div><h1>Settings <span class="heading-dot">.</span></h1><p class="lede">Choose where files go and how transfers run.</p></div></div>
+        <div class="settings-layout">
+          <div class="settings-nav"><a class="settings-nav-item selected" href="#download-behavior">Download behavior</a><a class="settings-nav-item" href="#storage">Storage</a><a class="settings-nav-item" href="#about">About Fetchflow</a></div>
+          <div class="settings-content">
+            <form id="settings-form">
+              <section class="settings-section" id="download-behavior"><div class="settings-section-title"><div class="setting-icon">⇄</div><div><h2>Download behavior</h2><p>Balance speed with your network and the source server.</p></div></div>
+                <label class="setting-row"><span><strong>Simultaneous downloads</strong><small>Maximum files downloading at once</small></span><select name="concurrency"><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>8</option><option>12</option><option>16</option></select></label>
+                <label class="setting-row"><span><strong>Per-host limit</strong><small>Downloads from the same server at once</small></span><select name="perHost"><option>1</option><option>2</option><option>3</option><option>4</option><option>8</option><option>16</option></select></label>
+                <label class="setting-row"><span><strong>Connections per file</strong><small>Parallel file ranges when the server supports them</small></span><select name="connectionsPerFile"><option>1</option><option>2</option><option>3</option><option>4</option><option>6</option><option>8</option><option>12</option><option>16</option></select></label>
+                <label class="setting-row"><span><strong>Speed limit</strong><small>Set to 0 for no limit</small></span><span class="input-suffix"><input name="speedLimitKiB" type="number" min="0" max="1000000" step="128"><em>KB/s</em></span></label>
+                <div class="setting-footnote">Known-size files use parallel byte ranges when the server supports safe ranged downloads; other servers fall back to one connection.</div>
+              </section>
+              <section class="settings-section" id="storage"><div class="settings-section-title"><div class="setting-icon">▤</div><div><h2>Storage</h2><p>New files are saved to this folder. Existing files are never overwritten.</p></div></div>
+                <label class="setting-field"><span>Download folder</span><input name="folder" type="text" spellcheck="false" placeholder="C:\\Users\\You\\Downloads"></label>
+                <div class="setting-footnote">Partial downloads use a temporary file beside the final file so they can continue later.</div>
+              </section>
+              <section class="settings-section about-section" id="about"><div class="settings-section-title"><div class="setting-icon">✳</div><div><h2>About Fetchflow</h2><p>Built for direct HTTP and HTTPS downloads.</p></div></div><div class="scope-pills"><span>Direct links</span><span>Local queue</span><span>Resume support</span></div></section>
+              <div class="settings-savebar"><span id="settings-message">Preferences are stored on this device.</span><button class="button button-primary" type="submit">Save preferences</button></div>
+            </form>
+          </div>
+        </div>
+      </section>
+      <footer class="app-footer"><span>FETCHFLOW <b>·</b> PRIVATE BY DEFAULT</span><span>DOWNLOADS STAY ON THIS DEVICE</span></footer>
+    </main>
+  </div>
+  <dialog id="delete-files-dialog" class="confirm-dialog">
+    <div class="dialog-icon">!</div>
+    <h2>Delete selected files?</h2>
+    <p id="delete-files-message">The selected downloads and any downloaded or partial files will be removed from this device. This can’t be undone.</p>
+    <div class="dialog-actions"><button class="button button-secondary" id="cancel-delete-files">Cancel</button><button class="button button-danger" id="confirm-delete-files">Delete files</button></div>
+  </dialog>
+  <div id="download-context-menu" class="download-context-menu" hidden>
+    <div id="download-context-actions"></div>
+  </div>
+  <dialog id="refresh-link-dialog" class="confirm-dialog refresh-link-dialog">
+    <div class="dialog-icon refresh-icon">↻</div>
+    <h2>Refresh download link</h2>
+    <p id="refresh-link-details">Paste a fresh direct URL. Fetchflow will verify it can continue from your saved progress.</p>
+    <label class="refresh-url-field">Fresh direct link<input id="refresh-link-input" type="url" placeholder="https://example.com/file.zip" spellcheck="false" autocomplete="off"></label>
+    <div id="refresh-link-message" class="refresh-link-message">Your partial file stays in place. The new URL must support resuming at its current byte offset.</div>
+    <div class="dialog-actions"><button class="button button-secondary" id="cancel-refresh-link">Cancel</button><button class="button button-primary" id="confirm-refresh-link">Verify and resume</button></div>
+  </dialog>
+  <div id="toast-region" class="toast-region" aria-live="polite"></div>
+</body>
+</html>

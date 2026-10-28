@@ -1,0 +1,49 @@
+#view-downloads .table-head,
+#view-downloads .download-row {
+  grid-template-columns: 24px minmax(210px, 2.5fr) minmax(65px, .75fr) minmax(90px, 1fr) minmax(95px, 1.05fr) minmax(125px, 1.4fr) 36px;
+}
+#view-downloads .col-select,
+#view-downloads .download-select-cell { display: grid; place-items: center; }
+#view-downloads .col-select input,
+#view-downloads .download-select-cell input { width: 13px; height: 13px; accent-color: var(--green-strong); cursor: pointer; }
+#view-downloads .bulk-remove-tools { display: flex; align-items: center; gap: 7px; }
+#view-downloads #download-bulk-actions[hidden] { display: none; }
+#view-downloads #selected-download-count { color: #9eabb5; font: 10px var(--mono); white-space: nowrap; }
+#view-downloads .bulk-remove-tools .button { height: 29px; padding: 0 9px; font-size: 9px; white-space: nowrap; }
+.button-danger { border: 1px solid #613a38; background: #382321; color: #f2b5ad; }
+.button-danger:hover:not(:disabled) { background: #4a2b28; border-color: #86504b; }
+.button-danger:disabled { opacity: .4; cursor: not-allowed; }
+.confirm-dialog { width: min(430px, calc(100vw - 32px)); border: 1px solid #3b4a55; border-radius: 12px; padding: 25px; background: #18222c; color: var(--text); box-shadow: 0 25px 80px #000b; }
+.confirm-dialog::backdrop { background: #05090dc9; backdrop-filter: blur(3px); }
+.dialog-icon { width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid #70433f; border-radius: 9px; background: #3a2522; color: #f2a69d; font: 700 16px var(--display); }
+.confirm-dialog h2 { margin: 14px 0 5px; font: 700 16px var(--display); }
+.confirm-dialog p { margin: 0; color: #9ba8b2; font-size: 11px; line-height: 1.65; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 23px; }
+#download-context-menu { position: fixed; z-index: 30; min-width: 205px; padding: 4px; border: 1px solid #394955; border-radius: 8px; background: #202c37; box-shadow: 0 12px 34px #0009; }
+#download-context-menu[hidden] { display: none; }
+#download-context-menu button { width: 100%; display: flex; align-items: center; gap: 9px; padding: 9px 10px; border: 0; border-radius: 5px; background: transparent; color: #d3e0e5; text-align: left; font-size: 10px; cursor: pointer; }
+#download-context-menu button:hover { background: #2b3b47; }
+#download-context-menu button:disabled { opacity: .4; cursor: not-allowed; }
+#download-context-menu button:disabled:hover { background: transparent; }
+#download-context-menu button.danger { color: #f2b5ad; }
+#download-context-menu button span { color: var(--green); font-size: 15px; }
+.refresh-link-dialog { width: min(510px, calc(100vw - 32px)); }
+.refresh-icon { border-color: #365747; background: #1c3027; color: var(--green); }
+.refresh-url-field { display: grid; gap: 6px; margin-top: 17px; color: #c4ced5; font-size: 10px; }
+.refresh-url-field input { width: 100%; min-width: 0; height: 36px; border: 1px solid #354651; border-radius: 6px; outline: none; padding: 0 10px; background: #10171e; color: var(--text); font: 10px var(--mono); }
+.refresh-url-field input:focus { border-color: #598a71; box-shadow: 0 0 0 2px #92e2bb14; }
+.refresh-link-message { color: #8997a1; font-size: 9px; line-height: 1.55; margin-top: 9px; }
+.refresh-link-message.error { color: #f2a69d; }
+.list-hint { color: #667580; font: 9px var(--mono); }
+.snail-mode-button.active { border-color: #547c60; background: #21362a; color: #bceacb; }
+.row-menu { width: 190px; }
+.row-menu button.danger { color: #f2b5ad; }
+@media (max-width: 1100px) {
+  #view-downloads .table-head,
+  #view-downloads .download-row { grid-template-columns: 24px minmax(175px, 2.2fr) minmax(62px, .7fr) minmax(80px, .9fr) minmax(85px, .9fr) minmax(100px, 1.2fr) 28px; gap: 8px; padding-left: 11px; padding-right: 11px; }
+}
+@media (max-width: 760px) {
+  #view-downloads .table-head,
+  #view-downloads .download-row { min-width: 724px; }
+  #view-downloads .bulk-remove-tools { flex-wrap: wrap; }
+}

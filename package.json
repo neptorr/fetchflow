@@ -1,0 +1,9 @@
+{
+  "name": "fetchflow",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A local, direct-link download manager",
+  "scripts": {
+    "start": "node server.mjs"
+  }
+}

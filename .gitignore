@@ -1,0 +1,7 @@
+/work/
+/Fetchflow.exe
+/Fetchflow-Setup.exe
+/node_modules/
+*.pdb
+*.user
+*.suo
