@@ -1,10 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+     xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
   <Product
     Id="*"
-    Name="Fetchflow"
+    Name="Fetchflow Download Manager"
     Language="1033"
-    Version="1.1.0"
+    Version="1.3.30"
     Manufacturer="Fetchflow"
     UpgradeCode="6372B674-0871-4F2E-B96F-D2AE1840C77A">
     <Package
@@ -16,10 +17,25 @@
     <MajorUpgrade
       DowngradeErrorMessage="A newer version of Fetchflow is already installed."
       Schedule="afterInstallInitialize" />
+    <util:CloseApplication
+      Id="CloseFetchflowBeforeUpgrade"
+      Target="Fetchflow.exe"
+      Description="Fetchflow Download Manager is running. Continue to close it before installing? Active downloads will be paused and saved."
+      PromptToContinue="yes"
+      EndSessionMessage="yes"
+      TerminateProcess="0"
+      RebootPrompt="no"
+      Timeout="60" />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
 
     <Property Id="ARPPRODUCTICON" Value="FetchflowIcon" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALTEXT" Value="Fetchflow Download Manager installation successful." />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch Fetchflow Download Manager after installation" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <Property Id="WixShellExecTarget" Value="[#FetchflowExecutable]" />
     <Icon Id="FetchflowIcon" SourceFile="$(var.BuildDir)\Fetchflow.exe" />
+
+    <CustomAction Id="LaunchFetchflow" BinaryKey="WixCA" DllEntry="WixShellExec" Impersonate="yes" />
 
     <Directory Id="TARGETDIR" Name="SourceDir">
       <Directory Id="LocalAppDataFolder">
@@ -27,6 +43,10 @@
           <Directory Id="INSTALLFOLDER" Name="Fetchflow">
             <Component Id="FetchflowApplication" Guid="D5D27939-7F97-4A66-AF13-85E058D22E53" Win64="yes">
               <File Id="FetchflowExecutable" Source="$(var.BuildDir)\Fetchflow.exe" />
+              <File Id="FFmpegExecutable" Source="$(var.BuildDir)\ffmpeg.exe" />
+              <File Id="FFmpegLicenseNotice" Source="$(var.BuildDir)\FFmpeg-Third-Party-Notices.txt" />
+              <File Id="FFmpegLicenseText" Source="$(var.BuildDir)\LGPL-3.0.txt" />
+              <File Id="FetchflowLicense" Source="$(var.BuildDir)\Fetchflow-License.txt" />
               <RegistryValue
                 Root="HKCU"
                 Key="Software\Fetchflow"
@@ -34,8 +54,29 @@
                 Type="integer"
                 Value="1"
                 KeyPath="yes" />
+              <RegistryValue Root="HKCU" Key="Software\Classes\fetchflow" Type="string" Value="URL:Fetchflow Download Manager Protocol" />
+              <RegistryValue Root="HKCU" Key="Software\Classes\fetchflow" Name="URL Protocol" Type="string" Value="" />
+              <RegistryValue Root="HKCU" Key="Software\Classes\fetchflow\DefaultIcon" Type="string" Value="&quot;[INSTALLFOLDER]Fetchflow.exe&quot;,0" />
+              <RegistryValue Root="HKCU" Key="Software\Classes\fetchflow\shell\open\command" Type="string" Value="&quot;[INSTALLFOLDER]Fetchflow.exe&quot; &quot;%1&quot;" />
               <RemoveFolder Id="RemoveFetchflowInstallFolder" On="uninstall" />
             </Component>
+            <Directory Id="ChromeExtensionFolder" Name="ChromeExtension">
+              <Component Id="FetchflowChromeExtension" Guid="8D0DA3D6-42C4-4E2E-89D6-BAA57A2C1E61" Win64="yes">
+                <File Id="ChromeExtensionManifest" Source="$(var.BuildDir)\chrome-extension\manifest.json" />
+                <File Id="ChromeExtensionBackground" Source="$(var.BuildDir)\chrome-extension\background.js" />
+                <File Id="ChromeExtensionClickCapture" Source="$(var.BuildDir)\chrome-extension\click-capture.js" />
+                <File Id="ChromeExtensionVideoOverlay" Source="$(var.BuildDir)\chrome-extension\video-overlay.js" />
+                <File Id="ChromeExtensionPopupHtml" Source="$(var.BuildDir)\chrome-extension\popup.html" />
+                <File Id="ChromeExtensionPopupJs" Source="$(var.BuildDir)\chrome-extension\popup.js" />
+                <File Id="ChromeExtensionPopupCss" Source="$(var.BuildDir)\chrome-extension\popup.css" />
+                <File Id="ChromeExtensionIcon" Source="$(var.BuildDir)\chrome-extension\icon.png" />
+                <File Id="ChromeExtensionReadme" Source="$(var.BuildDir)\chrome-extension\README.md" />
+                <File Id="ChromeNativeHostManifest" Source="$(var.BuildDir)\chrome-extension\native-host.json" />
+                <RegistryValue Root="HKCU" Key="Software\Google\Chrome\NativeMessagingHosts\com.fetchflow.download_manager" Type="string" Value="[INSTALLFOLDER]ChromeExtension\native-host.json" />
+                <RegistryValue Root="HKCU" Key="Software\Fetchflow\Extensions" Name="ChromeDownloadCatcher" Type="integer" Value="1" KeyPath="yes" />
+                <RemoveFolder Id="RemoveChromeExtensionFolder" On="uninstall" />
+              </Component>
+            </Directory>
             <Component Id="RemoveProgramsFolder" Guid="*" Win64="yes">
               <RemoveFolder Id="RemoveProgramsFolderOnUninstall" Directory="ProgramsFolder" On="uninstall" />
               <RegistryValue
@@ -51,12 +92,12 @@
       </Directory>
 
       <Directory Id="ProgramMenuFolder">
-        <Directory Id="ApplicationProgramsFolder" Name="Fetchflow">
+          <Directory Id="ApplicationProgramsFolder" Name="Fetchflow Download Manager">
           <Component Id="FetchflowStartMenuShortcut" Guid="*" Win64="yes">
             <Shortcut
               Id="FetchflowStartMenuShortcut"
-              Name="Fetchflow"
-              Description="Fetchflow download manager"
+              Name="Fetchflow Download Manager"
+              Description="Fetchflow Download Manager"
               Target="[INSTALLFOLDER]Fetchflow.exe"
               WorkingDirectory="INSTALLFOLDER"
               Advertise="no" />
@@ -73,10 +114,17 @@
       </Directory>
     </Directory>
 
-    <Feature Id="MainFeature" Title="Fetchflow" Level="1">
+    <Feature Id="MainFeature" Title="Fetchflow Download Manager" Level="1">
       <ComponentRef Id="FetchflowApplication" />
+      <ComponentRef Id="FetchflowChromeExtension" />
       <ComponentRef Id="RemoveProgramsFolder" />
       <ComponentRef Id="FetchflowStartMenuShortcut" />
     </Feature>
+
+    <UI>
+      <UIRef Id="WixUI_Minimal" />
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchFetchflow">WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed</Publish>
+    </UI>
   </Product>
 </Wix>
+

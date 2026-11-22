@@ -1,0 +1,8 @@
+{
+  "name": "com.fetchflow.download_manager",
+  "description": "Fetchflow Download Manager Chrome integration",
+  "path": "..\\Fetchflow.exe",
+  "type": "stdio",
+  "allowed_origins": ["chrome-extension://joabmphifckcidahjfgmhkonpnmnjbhm/"]
+}
+

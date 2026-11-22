@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fetchflow Download Catcher</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <img src="icon.png" alt="">
+    <div><strong>Fetchflow</strong><span>Download Catcher</span></div>
+  </header>
+  <label class="toggle"><input id="auto-route" type="checkbox"><span>Automatically route Chrome downloads to Fetchflow</span></label>
+  <label class="toggle"><input id="video-buttons" type="checkbox"><span>Show video download buttons</span></label>
+  <div class="toolbar"><span id="count">Recent downloads</span><button id="clear" type="button">Clear</button></div>
+  <main id="items" aria-live="polite"></main>
+  <p id="empty" class="empty" hidden>New browser downloads will appear here.</p>
+  <p id="notice" role="status" class="notice">When enabled, Chrome asks Fetchflow to take each download. Chrome keeps its copy if Fetchflow is unavailable or you cancel.</p>
+  <script src="popup.js"></script>
+</body>
+</html>
+

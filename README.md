@@ -21,12 +21,18 @@ Download the Windows MSI installer from [GitHub Releases](https://github.com/nep
 
 YouTube format availability depends on the video. Fetchflow uses yt-dlp to inspect and download selected formats; it retrieves the official yt-dlp helper and verifies its checksum when needed. FFmpeg is included with the MSI for merging video and audio streams and converting audio to MP3.
 
+## Chrome extension
+
+The MSI installs **Fetchflow Download Catcher** in the app folder and registers Chrome’s native messaging connection. Install MSI version 1.3.30 or later, open `chrome://extensions`, turn on **Developer mode**, choose **Load unpacked**, and select `%LOCALAPPDATA%\Programs\Fetchflow\ChromeExtension`. Reload the extension after updating Fetchflow and allow site access for the pages where you want its video button.
+
+With **Automatically route Chrome downloads to Fetchflow** enabled, recognized file-link clicks are handed to Fetchflow before Chrome begins a transfer. Downloads triggered by page scripts or unrecognized links use Chrome’s pause-and-handoff fallback. The extension popup has a **Show video download buttons** setting. Enabled player controls show direct video sources and quality labels collected as the video loads; YouTube qualities are fetched ahead of selection and appear in the video button, where choosing one starts that format in Fetchflow. DRM-protected or segmented streams may not expose a direct downloadable file. Fetchflow begins routed transfers in the background and shows a centered confirmation with the resolved filename and editable save path. Choose **Keep downloading** to continue or **Cancel** to stop and remove Fetchflow’s transfer. If Fetchflow cannot accept the handoff, Chrome resumes its copy. The extension also adds **Send link to Fetchflow** to link context menus and keeps recent downloads in its popup.
+
 ## Getting started
 
 1. Install Fetchflow from the MSI and open **Fetchflow Download Manager** from the Start menu.
 2. Open **LinkGrabber** and paste one or more direct HTTP/HTTPS links or a public YouTube video URL.
 3. Select **Check links**. For YouTube, wait for available formats to load and choose the video or audio quality you want.
-4. Select the items to add to the queue, then choose **Start queue** when ready.
+4. Select the items and choose **Add selected to queue**. Fetchflow starts the queue automatically; use **Start queue** to resume it later if needed.
 
 Settings and the download queue are saved on this device. To resume queued downloads automatically after signing in to Windows, enable **Start with Windows and resume queued downloads at sign-in** in Settings.
 

@@ -5,12 +5,14 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.IO.Pipes;
 using System.Linq;
 using Microsoft.Win32;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
 using System.Runtime.InteropServices;
@@ -52,6 +54,13 @@ public sealed class NativeDownload
     [DataMember(Name="lastModified")] public string LastModified { get; set; }
     [DataMember(Name="segmentedMode")] public bool SegmentedMode { get; set; }
     [DataMember(Name="completedRanges")] public List<long[]> CompletedRanges { get; set; }
+    [DataMember(Name="retryCount")] public int RetryCount { get; set; }
+    [DataMember(Name="retryAt")] public string RetryAt { get; set; }
+    [DataMember(Name="youtube")] public bool IsYoutube { get; set; }
+    [DataMember(Name="mediaMode")] public string MediaMode { get; set; }
+    [DataMember(Name="mediaSelector")] public string MediaSelector { get; set; }
+    [DataMember(Name="mediaExtension")] public string MediaExtension { get; set; }
+    [DataMember(Name="mediaAudioQuality")] public string MediaAudioQuality { get; set; }
     [IgnoreDataMember] public long CurrentSpeed;
     [IgnoreDataMember] public long SpeedSampleBytes;
     [IgnoreDataMember] public long SpeedLastSampleTimestamp;
@@ -74,12 +83,79 @@ public sealed class GrabResult
     public bool Ranges { get; set; }
     public string Status { get; set; }
     public string Error { get; set; }
+    public bool IsYoutube { get; set; }
+    public List<YtFormatChoice> Formats { get; set; }
+    public string SelectedFormatKey { get; set; }
+}
+
+[DataContract]
+public sealed class YtFormatChoice
+{
+    [DataMember(Name="key")] public string Key { get; set; }
+    [DataMember(Name="label")] public string Label { get; set; }
+    [DataMember(Name="selector")] public string Selector { get; set; }
+    [DataMember(Name="mode")] public string Mode { get; set; }
+    [DataMember(Name="extension")] public string Extension { get; set; }
+    [DataMember(Name="requiresFfmpeg")] public bool RequiresFfmpeg { get; set; }
+    [DataMember(Name="audioQuality")] public string AudioQuality { get; set; }
+}
+
+[DataContract]
+public sealed class YtVideoInfo
+{
+    [DataMember(Name="title")] public string Title { get; set; }
+    [DataMember(Name="formats")] public List<YtVideoFormat> Formats { get; set; }
+}
+
+[DataContract]
+public sealed class YtVideoFormat
+{
+    [DataMember(Name="format_id")] public string Id { get; set; }
+    [DataMember(Name="ext")] public string Extension { get; set; }
+    [DataMember(Name="height")] public int? Height { get; set; }
+    [DataMember(Name="abr")] public double? AudioBitrate { get; set; }
+    [DataMember(Name="vcodec")] public string VideoCodec { get; set; }
+    [DataMember(Name="acodec")] public string AudioCodec { get; set; }
+    [IgnoreDataMember] public int HeightValue { get { return Height.GetValueOrDefault(); } }
+    [IgnoreDataMember] public double AudioBitrateValue { get { return AudioBitrate.GetValueOrDefault(); } }
+}
+
+[DataContract]
+internal sealed class NativeBridgeMessage
+{
+    [DataMember(Name="kind")] public string Kind { get; set; }
+    [DataMember(Name="url")] public string Url { get; set; }
+    [DataMember(Name="name")] public string Name { get; set; }
+    [DataMember(Name="autoCheck")] public bool AutoCheck { get; set; }
+    [DataMember(Name="selector")] public string Selector { get; set; }
+    [DataMember(Name="mode")] public string Mode { get; set; }
+    [DataMember(Name="extension")] public string Extension { get; set; }
+    [DataMember(Name="audioQuality")] public string AudioQuality { get; set; }
+}
+
+[DataContract]
+internal sealed class NativeBridgeReply
+{
+    [DataMember(Name="ok")] public bool Ok { get; set; }
+    [DataMember(Name="error", EmitDefaultValue=false)] public string Error { get; set; }
+    [DataMember(Name="title", EmitDefaultValue=false)] public string Title { get; set; }
+    [DataMember(Name="formats", EmitDefaultValue=false)] public List<YtFormatChoice> Formats { get; set; }
 }
 
 internal static class NativeProgram
 {
     private const int SwRestore = 9;
+    private const uint WmCopyData = 0x004A;
+    private const string NativeExtensionId = "joabmphifckcidahjfgmhkonpnmnjbhm";
     private static readonly uint ActivateMessage = RegisterWindowMessage("Fetchflow.ActivateExistingInstance");
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct CopyDataPacket
+    {
+        public IntPtr Data;
+        public int ByteCount;
+        public IntPtr Payload;
+    }
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr FindWindow(string className, string windowName);
@@ -101,13 +177,20 @@ internal static class NativeProgram
     [STAThread]
     private static void Main()
     {
+        string[] arguments = Environment.GetCommandLineArgs();
+        if (arguments.Skip(1).Any(arg => arg.StartsWith("chrome-extension://", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunNativeMessagingHost(arguments);
+            return;
+        }
+        string browserRequest = arguments.Skip(1).FirstOrDefault(arg => arg.StartsWith("fetchflow://", StringComparison.OrdinalIgnoreCase));
         bool createdNew;
         string userId = WindowsIdentity.GetCurrent().User.Value;
         using (Mutex singleInstance = new Mutex(true, "Local\\Fetchflow." + userId, out createdNew))
         {
             if (!createdNew)
             {
-                ActivateExistingInstance();
+                ActivateExistingInstance(browserRequest);
                 return;
             }
 
@@ -116,7 +199,7 @@ internal static class NativeProgram
                 ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
-                Application.Run(new NativeMainForm());
+                Application.Run(new NativeMainForm(browserRequest));
             }
             finally
             {
@@ -125,10 +208,166 @@ internal static class NativeProgram
         }
     }
 
-    private static void ActivateExistingInstance()
+    private static void RunNativeMessagingHost(string[] arguments)
     {
-        IntPtr window = FindWindow(null, "Fetchflow");
+        NativeBridgeReply reply = new NativeBridgeReply { Ok = false, Error = "The Fetchflow browser connection was rejected." };
+        string expectedOrigin = "chrome-extension://" + NativeExtensionId + "/";
+        string origin = arguments.Skip(1).FirstOrDefault(arg => arg.StartsWith("chrome-extension://", StringComparison.OrdinalIgnoreCase));
+        try
+        {
+            if (!String.Equals(origin, expectedOrigin, StringComparison.Ordinal)) throw new UnauthorizedAccessException("This extension is not allowed to connect to Fetchflow.");
+            Stream input = Console.OpenStandardInput();
+            byte[] header = new byte[4];
+            if (!ReadNativeBytes(input, header, header.Length)) throw new EndOfStreamException("Chrome did not send a complete request.");
+            int length = BitConverter.ToInt32(header, 0);
+            if (length <= 0 || length > 1024 * 1024) throw new InvalidDataException("The browser request is too large or invalid.");
+            byte[] payload = new byte[length];
+            if (!ReadNativeBytes(input, payload, length)) throw new EndOfStreamException("The browser request was incomplete.");
+            NativeBridgeMessage message;
+            using (MemoryStream buffer = new MemoryStream(payload))
+                message = (NativeBridgeMessage)new DataContractJsonSerializer(typeof(NativeBridgeMessage)).ReadObject(buffer);
+            reply = OpenBrowserRequest(message);
+        }
+        catch (Exception error) { reply.Error = error.Message; }
+        try
+        {
+            using (MemoryStream buffer = new MemoryStream())
+            {
+                new DataContractJsonSerializer(typeof(NativeBridgeReply)).WriteObject(buffer, reply);
+                byte[] payload = buffer.ToArray();
+                byte[] header = BitConverter.GetBytes(payload.Length);
+                Stream output = Console.OpenStandardOutput();
+                output.Write(header, 0, header.Length);
+                output.Write(payload, 0, payload.Length);
+                output.Flush();
+            }
+        }
+        catch { }
+    }
+
+    private static bool ReadNativeBytes(Stream input, byte[] buffer, int count)
+    {
+        int offset = 0;
+        while (offset < count)
+        {
+            int read = input.Read(buffer, offset, count - offset);
+            if (read <= 0) return false;
+            offset += read;
+        }
+        return true;
+    }
+
+    private static NativeBridgeReply OpenBrowserRequest(NativeBridgeMessage message)
+    {
+        if (message == null || String.IsNullOrWhiteSpace(message.Url) || message.Url.Length > 14000)
+            return new NativeBridgeReply { Ok = false, Error = "The browser did not provide a valid download URL." };
+        Uri url;
+        if (!Uri.TryCreate(message.Url, UriKind.Absolute, out url) || (url.Scheme != Uri.UriSchemeHttp && url.Scheme != Uri.UriSchemeHttps))
+            return new NativeBridgeReply { Ok = false, Error = "Only HTTP and HTTPS links can be sent to Fetchflow." };
+        bool download = String.Equals(message.Kind, "download", StringComparison.Ordinal);
+        bool link = String.Equals(message.Kind, "link", StringComparison.Ordinal);
+        bool videoFormats = String.Equals(message.Kind, "video-formats", StringComparison.Ordinal);
+        bool youtubeDownload = String.Equals(message.Kind, "youtube-download", StringComparison.Ordinal);
+        if (!download && !link && !videoFormats && !youtubeDownload)
+            return new NativeBridgeReply { Ok = false, Error = "The browser request type is not supported." };
+        if ((videoFormats || youtubeDownload) && !IsYoutubeUrl(url.AbsoluteUri))
+            return new NativeBridgeReply { Ok = false, Error = "YouTube format requests must use a YouTube video URL." };
+        if (videoFormats)
+        {
+            string pipeName = "FetchflowFormats" + Guid.NewGuid().ToString("N");
+            string formatRequest = "fetchflow://formats?url=" + Uri.EscapeDataString(url.AbsoluteUri) + "&pipe=" + pipeName;
+            using (NamedPipeServerStream pipe = new NamedPipeServerStream(pipeName, PipeDirection.In, 1, PipeTransmissionMode.Byte, PipeOptions.None))
+            {
+                Process.Start(new ProcessStartInfo { FileName = formatRequest, UseShellExecute = true });
+                Task connect = Task.Run(() => pipe.WaitForConnection());
+                if (!connect.Wait(TimeSpan.FromMinutes(5))) return new NativeBridgeReply { Ok = false, Error = "Fetchflow did not return YouTube format details in time." };
+                using (StreamReader reader = new StreamReader(pipe, Encoding.UTF8))
+                {
+                    string encoded = reader.ReadLine();
+                    if (String.IsNullOrWhiteSpace(encoded)) return new NativeBridgeReply { Ok = false, Error = "Fetchflow returned no YouTube format details." };
+                    byte[] json = Convert.FromBase64String(encoded);
+                    using (MemoryStream buffer = new MemoryStream(json))
+                        return (NativeBridgeReply)new DataContractJsonSerializer(typeof(NativeBridgeReply)).ReadObject(buffer);
+                }
+            }
+        }
+        if (youtubeDownload)
+        {
+            if (String.IsNullOrWhiteSpace(message.Selector) || !Regex.IsMatch(message.Selector, "^[A-Za-z0-9._,+-]{1,120}$"))
+                return new NativeBridgeReply { Ok = false, Error = "The selected YouTube format is invalid." };
+            if (message.Mode != "video" && message.Mode != "audio" && message.Mode != "mp3")
+                return new NativeBridgeReply { Ok = false, Error = "The selected YouTube format type is invalid." };
+            string extension = Regex.IsMatch(message.Extension ?? "", "^[A-Za-z0-9]{1,8}$") ? message.Extension.ToLowerInvariant() : "mp4";
+            string youtubeHandoff = Guid.NewGuid().ToString("N");
+            string youtubeDownloadRequest = "fetchflow://youtube-download?url=" + Uri.EscapeDataString(url.AbsoluteUri) +
+                "&title=" + Uri.EscapeDataString((message.Name ?? "YouTube video").Substring(0, Math.Min((message.Name ?? "YouTube video").Length, 240))) +
+                "&selector=" + Uri.EscapeDataString(message.Selector) + "&mode=" + message.Mode + "&ext=" + extension + "&handoff=" + youtubeHandoff;
+            if (!String.IsNullOrWhiteSpace(message.AudioQuality)) youtubeDownloadRequest += "&audio=" + Uri.EscapeDataString(message.AudioQuality.Substring(0, Math.Min(message.AudioQuality.Length, 16)));
+            using (NamedPipeServerStream pipe = new NamedPipeServerStream("FetchflowBrowser" + youtubeHandoff, PipeDirection.In, 1, PipeTransmissionMode.Byte, PipeOptions.None))
+            {
+                Process.Start(new ProcessStartInfo { FileName = youtubeDownloadRequest, UseShellExecute = true });
+                Task connect = Task.Run(() => pipe.WaitForConnection());
+                if (!connect.Wait(TimeSpan.FromSeconds(30))) return new NativeBridgeReply { Ok = false, Error = "Fetchflow did not receive the selected YouTube quality." };
+                using (StreamReader reader = new StreamReader(pipe, Encoding.UTF8))
+                    return String.Equals(reader.ReadLine(), "started", StringComparison.Ordinal) ? new NativeBridgeReply { Ok = true } : new NativeBridgeReply { Ok = false, Error = "Fetchflow could not start the selected YouTube quality." };
+            }
+        }
+        string request = "fetchflow://" + (download ? "download" : "add") + "?url=" + Uri.EscapeDataString(url.AbsoluteUri);
+        if (download && !String.IsNullOrWhiteSpace(message.Name)) request += "&name=" + Uri.EscapeDataString(message.Name.Substring(0, Math.Min(message.Name.Length, 240)));
+        if (link && message.AutoCheck) request += "&check=1";
+        if (!download)
+        {
+            Process.Start(new ProcessStartInfo { FileName = request, UseShellExecute = true });
+            return new NativeBridgeReply { Ok = true };
+        }
+        string handoff = Guid.NewGuid().ToString("N");
+        request += "&handoff=" + handoff;
+        using (NamedPipeServerStream pipe = new NamedPipeServerStream("FetchflowBrowser" + handoff, PipeDirection.In, 1, PipeTransmissionMode.Byte, PipeOptions.None))
+        {
+            Process.Start(new ProcessStartInfo { FileName = request, UseShellExecute = true });
+            Task connect = Task.Run(() => pipe.WaitForConnection());
+            if (!connect.Wait(TimeSpan.FromMinutes(10))) return new NativeBridgeReply { Ok = false, Error = "Fetchflow did not receive the Chrome download prompt." };
+            using (StreamReader reader = new StreamReader(pipe, Encoding.UTF8))
+            {
+                string decision = reader.ReadLine();
+                if (String.Equals(decision, "started", StringComparison.Ordinal)) return new NativeBridgeReply { Ok = true };
+                return new NativeBridgeReply { Ok = false, Error = "Download canceled in Fetchflow." };
+            }
+        }
+    }
+
+    private static bool IsYoutubeUrl(string value)
+    {
+        Uri uri;
+        if (!Uri.TryCreate(value, UriKind.Absolute, out uri) || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)) return false;
+        string host = uri.Host.ToLowerInvariant();
+        return host == "youtube.com" || host.EndsWith(".youtube.com", StringComparison.Ordinal) || host == "youtu.be" || host == "youtube-nocookie.com" || host.EndsWith(".youtube-nocookie.com", StringComparison.Ordinal);
+    }
+
+    private static void ActivateExistingInstance(string browserRequest)
+    {
+        IntPtr window = FindWindow(null, "Fetchflow Download Manager");
         if (window == IntPtr.Zero) return;
+        if (!String.IsNullOrWhiteSpace(browserRequest))
+        {
+            IntPtr payload = Marshal.StringToHGlobalUni(browserRequest);
+            IntPtr packetPointer = IntPtr.Zero;
+            try
+            {
+                CopyDataPacket packet = new CopyDataPacket { Data = IntPtr.Zero, ByteCount = Encoding.Unicode.GetByteCount(browserRequest + "\0"), Payload = payload };
+                packetPointer = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(CopyDataPacket)));
+                Marshal.StructureToPtr(packet, packetPointer, false);
+                SendMessage(window, WmCopyData, IntPtr.Zero, packetPointer);
+            }
+            finally
+            {
+                if (packetPointer != IntPtr.Zero) Marshal.FreeHGlobal(packetPointer);
+                Marshal.FreeHGlobal(payload);
+            }
+        }
+        Uri requestUri;
+        bool backgroundFormats = Uri.TryCreate(browserRequest, UriKind.Absolute, out requestUri) && String.Equals(requestUri.Host, "formats", StringComparison.OrdinalIgnoreCase);
+        if (backgroundFormats) return;
         SendMessage(window, ActivateMessage, IntPtr.Zero, IntPtr.Zero);
         ShowWindowAsync(window, SwRestore);
         SetForegroundWindow(window);
@@ -137,6 +376,7 @@ internal static class NativeProgram
 
 public sealed class NativeMainForm : Form
 {
+    private const int MaxAutomaticRetries = 3;
     private static readonly HttpClient Http = CreateHttpClient();
     private readonly string appData = String.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("FETCHFLOW_DATA_DIR"))
         ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Fetchflow")
@@ -157,6 +397,8 @@ public sealed class NativeMainForm : Form
     private bool closing;
     private bool closeRequested;
     private string contextDownloadId;
+    private string focusedDownloadId;
+    private int focusedDownloadColumn = 1;
 
     private TabControl tabs;
     private DataGridView downloadGrid;
@@ -187,12 +429,16 @@ public sealed class NativeMainForm : Form
     private NotifyIcon trayIcon;
     private CheckBox resumeAtLoginBox;
     private bool exitRequested;
+    private bool backgroundFormatOnly;
     private string stateLoadProblem;
     private bool stateRecoveredFromBackup;
 
-    public NativeMainForm()
+    public NativeMainForm(string initialBrowserRequest)
     {
-        Text = "Fetchflow";
+        Uri initialUri;
+        backgroundFormatOnly = Uri.TryCreate(initialBrowserRequest, UriKind.Absolute, out initialUri) && String.Equals(initialUri.Host, "formats", StringComparison.OrdinalIgnoreCase);
+        Text = "Fetchflow Download Manager";
+        Icon = System.Drawing.Icon.ExtractAssociatedIcon(Application.ExecutablePath) ?? System.Drawing.SystemIcons.Application;
         StartPosition = FormStartPosition.CenterScreen;
         MinimumSize = new Size(980, 650);
         Size = new Size(1180, 780);
@@ -217,6 +463,9 @@ public sealed class NativeMainForm : Form
         refreshTimer.Tick += delegate { UpdateLiveRows(); };
         refreshTimer.Start();
         FormClosing += OnClosing;
+        if (backgroundFormatOnly) { Opacity = 0; ShowInTaskbar = false; WindowState = FormWindowState.Minimized; }
+        if (!String.IsNullOrWhiteSpace(initialBrowserRequest))
+            BeginInvoke((Action)delegate { ReceiveBrowserRequest(initialBrowserRequest); });
         if (settings.ResumeAtLogin && Environment.GetCommandLineArgs().Any(arg => String.Equals(arg, "--resume-queue", StringComparison.OrdinalIgnoreCase)))
         {
             BeginInvoke((Action)delegate { StartQueue(); HideToTray(); });
@@ -225,6 +474,21 @@ public sealed class NativeMainForm : Form
 
     protected override void WndProc(ref Message message)
     {
+        if (message.Msg == 0x004A && message.LParam != IntPtr.Zero)
+        {
+            try
+            {
+                NativeProgram.CopyDataPacket packet = (NativeProgram.CopyDataPacket)Marshal.PtrToStructure(message.LParam, typeof(NativeProgram.CopyDataPacket));
+                if (packet.ByteCount >= 2 && packet.ByteCount <= 32768 && packet.ByteCount % 2 == 0 && packet.Payload != IntPtr.Zero)
+                {
+                    string requestText = Marshal.PtrToStringUni(packet.Payload, packet.ByteCount / 2 - 1);
+                    BeginInvoke((Action)delegate { ReceiveBrowserRequest(requestText); });
+                    message.Result = new IntPtr(1);
+                    return;
+                }
+            }
+            catch (Exception error) { WriteLog("WARN", "Could not read a browser link: " + error.Message); }
+        }
         if ((uint)message.Msg == NativeProgram.ExistingInstanceMessage)
         {
             RestoreFromTray();
@@ -232,6 +496,306 @@ public sealed class NativeMainForm : Form
         }
         base.WndProc(ref message);
     }
+
+    private void ReceiveBrowserRequest(string requestText)
+    {
+        Uri request;
+        if (!Uri.TryCreate(requestText, UriKind.Absolute, out request) || !String.Equals(request.Scheme, "fetchflow", StringComparison.OrdinalIgnoreCase)) return;
+        Dictionary<string, string> parameters = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string field in (request.Query ?? "").TrimStart('?').Split('&'))
+        {
+            int separator = field.IndexOf('=');
+            if (separator <= 0) continue;
+            try { parameters[Uri.UnescapeDataString(field.Substring(0, separator))] = Uri.UnescapeDataString(field.Substring(separator + 1).Replace("+", "%20")); }
+            catch { }
+        }
+        if (String.Equals(request.Host, "download", StringComparison.OrdinalIgnoreCase))
+        {
+            string directUrl;
+            if (parameters.TryGetValue("url", out directUrl)) ReceiveBrowserDownload(directUrl, parameters.ContainsKey("name") ? parameters["name"] : "", parameters.ContainsKey("handoff") ? parameters["handoff"] : "");
+            return;
+        }
+        if (String.Equals(request.Host, "formats", StringComparison.OrdinalIgnoreCase))
+        {
+            string videoUrl, pipeName;
+            if (parameters.TryGetValue("url", out videoUrl) && parameters.TryGetValue("pipe", out pipeName) && Regex.IsMatch(pipeName, "^FetchflowFormats[a-fA-F0-9]{32}$") && IsYoutubeUrl(videoUrl))
+                BeginInvoke((Action)delegate { FetchBrowserYoutubeFormats(videoUrl, pipeName); });
+            else if (parameters.TryGetValue("pipe", out pipeName)) BeginInvoke((Action)delegate { SendBrowserFormatsResponse(pipeName, new NativeBridgeReply { Ok = false, Error = "The YouTube format request was invalid." }); });
+            return;
+        }
+        if (String.Equals(request.Host, "youtube-download", StringComparison.OrdinalIgnoreCase))
+        {
+            string videoUrl, title, selector, mode, extension, handoff;
+            if (parameters.TryGetValue("url", out videoUrl) && parameters.TryGetValue("title", out title) && parameters.TryGetValue("selector", out selector) && parameters.TryGetValue("mode", out mode) && parameters.TryGetValue("ext", out extension) && parameters.TryGetValue("handoff", out handoff))
+                ReceiveYoutubeBrowserDownload(videoUrl, title, selector, mode, extension, parameters.ContainsKey("audio") ? parameters["audio"] : "", handoff);
+            return;
+        }
+        if (!String.Equals(request.Host, "add", StringComparison.OrdinalIgnoreCase)) return;
+        List<string> incoming = new List<string>();
+        string addUrl;
+        string browserVideoUrl = null;
+        if (parameters.TryGetValue("url", out addUrl))
+        {
+            Uri target;
+            if (Uri.TryCreate(addUrl, UriKind.Absolute, out target) && (target.Scheme == Uri.UriSchemeHttp || target.Scheme == Uri.UriSchemeHttps)) { incoming.Add(target.AbsoluteUri); browserVideoUrl = target.AbsoluteUri; }
+        }
+        bool autoCheckVideo = browserVideoUrl != null && parameters.ContainsKey("check") && String.Equals(parameters["check"], "1", StringComparison.Ordinal);
+        if (incoming.Count == 0 && !autoCheckVideo) return;
+        HashSet<string> existing = new HashSet<string>((linksBox.Text ?? "").Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).Select(value => value.Trim()), StringComparer.OrdinalIgnoreCase);
+        int added = 0;
+        foreach (string url in incoming.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (existing.Contains(url) || existing.Count >= 80) continue;
+            linksBox.AppendText((linksBox.TextLength == 0 || linksBox.Text.EndsWith("\n", StringComparison.Ordinal) ? "" : Environment.NewLine) + url);
+            existing.Add(url);
+            added++;
+        }
+        tabs.SelectedIndex = 1;
+        WindowState = FormWindowState.Normal;
+        Show();
+        Activate();
+        linksBox.Focus();
+        WriteLog("INFO", "Received " + added + " browser link(s) in LinkGrabber.");
+        if (autoCheckVideo) BeginInvoke((Action)delegate { CheckBrowserVideoLink(browserVideoUrl); });
+    }
+
+    private async void FetchBrowserYoutubeFormats(string url, string pipeName)
+    {
+        NativeBridgeReply reply;
+        try
+        {
+            string ytDlp = await EnsureYoutubeExtractor();
+            GrabResult result = await InspectYoutube(url, ytDlp);
+            reply = new NativeBridgeReply { Ok = result.Formats != null && result.Formats.Count > 0, Error = result.Error, Title = result.Filename, Formats = result.Formats };
+        }
+        catch (Exception error) { reply = new NativeBridgeReply { Ok = false, Error = "Could not fetch YouTube qualities: " + error.Message }; }
+        SendBrowserFormatsResponse(pipeName, reply);
+        if (backgroundFormatOnly) BeginInvoke((Action)delegate { exitRequested = true; Close(); });
+    }
+
+    private void SendBrowserFormatsResponse(string pipeName, NativeBridgeReply reply)
+    {
+        if (String.IsNullOrWhiteSpace(pipeName) || !Regex.IsMatch(pipeName, "^FetchflowFormats[a-fA-F0-9]{32}$")) return;
+        try
+        {
+            byte[] json;
+            using (MemoryStream buffer = new MemoryStream())
+            {
+                new DataContractJsonSerializer(typeof(NativeBridgeReply)).WriteObject(buffer, reply);
+                json = buffer.ToArray();
+            }
+            using (NamedPipeClientStream pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.Out))
+            {
+                pipe.Connect(10000);
+                using (StreamWriter writer = new StreamWriter(pipe, new UTF8Encoding(false))) { writer.WriteLine(Convert.ToBase64String(json)); writer.Flush(); }
+            }
+        }
+        catch (Exception error) { WriteLog("WARN", "Could not return YouTube formats to Chrome: " + error.Message); }
+    }
+
+    private void ReceiveYoutubeBrowserDownload(string value, string title, string selector, string mode, string extension, string audioQuality, string handoff)
+    {
+        Uri url;
+        if (!Uri.TryCreate(value, UriKind.Absolute, out url) || !IsYoutubeUrl(value) || !Regex.IsMatch(selector ?? "", "^[A-Za-z0-9._,+-]{1,120}$") || (mode != "video" && mode != "audio" && mode != "mp3")) { NotifyBrowserHandoff(handoff, "cancel"); return; }
+        string ext = SafeExtension(extension);
+        if (downloads.Any(d => d.IsYoutube && d.Url == url.AbsoluteUri && d.MediaSelector == selector && d.MediaMode == mode))
+        {
+            RestoreFromTray();
+            NotifyBrowserHandoff(handoff, "started");
+            return;
+        }
+        NativeDownload item = new NativeDownload { Id = Guid.NewGuid().ToString("N"), Url = url.AbsoluteUri, Filename = SafeFileName((String.IsNullOrWhiteSpace(title) ? "YouTube video" : title) + "." + ext), Host = "YouTube", Folder = settings.Folder, FilePath = "", Size = 0, Bytes = 0, AcceptsRanges = false, Status = "queued", Error = "", AddedAt = DateTime.UtcNow.ToString("o"), CompletedRanges = new List<long[]>(), IsYoutube = true, MediaMode = mode, MediaSelector = selector, MediaExtension = ext, MediaAudioQuality = audioQuality ?? "" };
+        downloads.Insert(0, item); selectedIds.Clear(); selectedIds.Add(item.Id); queueArmed = true;
+        SaveState(); RenderDownloads(); tabs.SelectedIndex = 0; RestoreFromTray();
+        if (StartOne(item, true)) { WriteLog("INFO", "Started YouTube download from Chrome: " + item.Filename + " using " + selector + "."); NotifyBrowserHandoff(handoff, "started"); }
+        else { item.Status = "queued"; WriteLog("WARN", "YouTube download was queued but did not start immediately."); NotifyBrowserHandoff(handoff, "cancel"); }
+        SaveState(); RenderDownloads();
+    }
+
+    private async void CheckBrowserVideoLink(string url)
+    {
+        string previousText = linksBox.Text;
+        try
+        {
+            linksBox.Text = url;
+            WriteLog("INFO", "Checking video formats requested from the Chrome video button.");
+            await CheckLinks();
+        }
+        finally { linksBox.Text = previousText; }
+    }
+
+    private async void ReceiveBrowserDownload(string value, string suggestedName, string handoff)
+    {
+        Uri url;
+        if (!Uri.TryCreate(value, UriKind.Absolute, out url) || (url.Scheme != Uri.UriSchemeHttp && url.Scheme != Uri.UriSchemeHttps)) { NotifyBrowserHandoff(handoff, "cancel"); return; }
+        string filename = await ResolveBrowserFilename(url, suggestedName);
+        if (String.IsNullOrWhiteSpace(filename)) filename = "download";
+        WriteLog("INFO", "Chrome filename resolved to " + filename + (String.IsNullOrWhiteSpace(suggestedName) ? " (browser did not provide a name)." : " (browser suggested " + SafeFileName(Path.GetFileName(suggestedName)) + ")."));
+        string downloadsFolder = GetDownloadsFolder();
+        string initialPath = ChoosePath(downloadsFolder, filename);
+        NativeDownload item = new NativeDownload { Id = Guid.NewGuid().ToString("N"), Url = url.AbsoluteUri, Filename = Path.GetFileName(initialPath), Host = url.Host, Folder = Path.GetDirectoryName(initialPath), FilePath = initialPath, Size = 0, Bytes = 0, AcceptsRanges = false, Status = "queued", Error = "", AddedAt = DateTime.UtcNow.ToString("o"), CompletedRanges = new List<long[]>() };
+        downloads.Insert(0, item);
+        selectedIds.Clear(); selectedIds.Add(item.Id);
+        queueArmed = true;
+        SaveState(); RenderDownloads();
+        if (!StartOne(item, true))
+        {
+            downloads.Remove(item); selectedIds.Remove(item.Id); SaveState(); RenderDownloads();
+            NotifyBrowserHandoff(handoff, "cancel");
+            WriteLog("WARN", "Could not start Chrome download in Fetchflow: " + item.Filename);
+            return;
+        }
+        WriteLog("INFO", "Chrome download is now running in Fetchflow: " + item.Filename + " from " + item.Host + ".");
+        RestoreFromTray();
+        NotifyBrowserHandoff(handoff, "started");
+        using (Form prompt = new Form { Text = "Chrome download received", ClientSize = new Size(650, 232), FormBorderStyle = FormBorderStyle.FixedDialog, StartPosition = FormStartPosition.Manual, MaximizeBox = false, MinimizeBox = false, BackColor = Color.FromArgb(17, 25, 34), ForeColor = ForeColor, Font = Font, Icon = Icon })
+        {
+            Label heading = new Label { Text = "Download is running in Fetchflow", Font = new Font("Segoe UI Semibold", 13F), AutoSize = true, Location = new Point(20, 18), ForeColor = Color.FromArgb(225, 237, 242) };
+            Label detail = new Label { Text = filename + "  ·  " + url.Host, AutoSize = false, AutoEllipsis = true, Location = new Point(22, 53), Size = new Size(600, 24), ForeColor = Color.FromArgb(150, 171, 181) };
+            Label status = new Label { Text = "Choose where to save it, keep downloading, or cancel the Fetchflow download.", AutoSize = false, Location = new Point(22, 78), Size = new Size(600, 20), ForeColor = Color.FromArgb(150, 171, 181) };
+            Label pathLabel = new Label { Text = "Save file to", AutoSize = true, Location = new Point(22, 91), ForeColor = Color.FromArgb(190, 207, 215) };
+            pathLabel.Location = new Point(22, 105);
+            TextBox pathBox = new TextBox { Text = initialPath, Location = new Point(22, 130), Size = new Size(500, 28), BackColor = Color.FromArgb(10, 17, 23), ForeColor = Color.FromArgb(224, 235, 240), BorderStyle = BorderStyle.FixedSingle };
+            Button browse = MakeButton("Browse…", delegate
+            {
+                using (SaveFileDialog dialog = new SaveFileDialog { Title = "Choose download path", InitialDirectory = Directory.Exists(Path.GetDirectoryName(pathBox.Text)) ? Path.GetDirectoryName(pathBox.Text) : downloadsFolder, FileName = Path.GetFileName(pathBox.Text), Filter = "All files (*.*)|*.*", CheckPathExists = true, OverwritePrompt = false, AddExtension = false })
+                    if (dialog.ShowDialog(prompt) == DialogResult.OK) pathBox.Text = dialog.FileName;
+            }, false);
+            browse.Location = new Point(532, 127);
+            Button cancel = MakeButton("Cancel", delegate { prompt.DialogResult = DialogResult.Cancel; prompt.Close(); }, false);
+            cancel.Location = new Point(432, 180);
+            Button downloadNow = MakeButton("Keep downloading", delegate { prompt.DialogResult = DialogResult.OK; prompt.Close(); }, true);
+            downloadNow.Location = new Point(528, 180);
+            prompt.Controls.AddRange(new Control[] { heading, detail, status, pathLabel, pathBox, browse, cancel, downloadNow });
+            prompt.AcceptButton = downloadNow;
+            prompt.CancelButton = cancel;
+            Rectangle area = Screen.FromControl(this).WorkingArea;
+            int left = this.Left + (this.Width - prompt.Width) / 2;
+            int top = this.Top + (this.Height - prompt.Height) / 2;
+            prompt.Location = new Point(Math.Max(area.Left, Math.Min(left, area.Right - prompt.Width)), Math.Max(area.Top, Math.Min(top, area.Bottom - prompt.Height)));
+            if (prompt.ShowDialog(this) != DialogResult.OK)
+            {
+                WriteLog("INFO", "Browser download canceled in Fetchflow: " + filename);
+                await CancelBrowserDownload(item);
+                return;
+            }
+            string targetPath;
+            try
+            {
+                targetPath = Path.GetFullPath(pathBox.Text.Trim());
+                if (String.IsNullOrWhiteSpace(Path.GetFileName(targetPath))) throw new InvalidOperationException("Choose a file name for this download.");
+                Directory.CreateDirectory(Path.GetDirectoryName(targetPath));
+            }
+            catch (Exception error) { MessageBox.Show(this, error.Message, "Download path", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
+            await ApplyBrowserDownloadPath(item, targetPath);
+        }
+    }
+
+    private async Task<string> ResolveBrowserFilename(Uri url, string browserName)
+    {
+        string browserLeaf = SafeFileName(Path.GetFileName(browserName ?? ""));
+        bool usefulBrowserName = !String.IsNullOrWhiteSpace(browserName) && !browserLeaf.StartsWith("Unconfirmed ", StringComparison.OrdinalIgnoreCase) && !browserLeaf.EndsWith(".crdownload", StringComparison.OrdinalIgnoreCase);
+        try
+        {
+            using (CancellationTokenSource timeout = new CancellationTokenSource(TimeSpan.FromSeconds(4)))
+            using (HttpRequestMessage request = new HttpRequestMessage(HttpMethod.Head, url))
+            using (HttpResponseMessage response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token))
+            {
+                ContentDispositionHeaderValue disposition = response.Content.Headers.ContentDisposition;
+                if (disposition != null && (!String.IsNullOrWhiteSpace(disposition.FileNameStar) || !String.IsNullOrWhiteSpace(disposition.FileName)))
+                    return ResponseFilename(response, response.RequestMessage == null ? url : response.RequestMessage.RequestUri);
+                if (usefulBrowserName) return browserLeaf;
+                return ResponseFilename(response, response.RequestMessage == null ? url : response.RequestMessage.RequestUri);
+            }
+        }
+        catch { return usefulBrowserName ? browserLeaf : FileNameFromUri(url); }
+    }
+
+    private async Task CancelBrowserDownload(NativeDownload item)
+    {
+        CancellationTokenSource token;
+        if (transfers.TryGetValue(item.Id, out token)) { item.Status = "paused"; token.Cancel(); }
+        while (transfers.ContainsKey(item.Id)) await Task.Delay(80);
+        if (!String.IsNullOrWhiteSpace(item.FilePath))
+        {
+            TryDelete(item.FilePath);
+            TryDelete(item.FilePath + ".fetchflow-part");
+            TryDelete(item.FilePath + ".part");
+        }
+        downloads.Remove(item); selectedIds.Remove(item.Id);
+        SaveState(); RenderDownloads(); PumpQueue();
+    }
+
+    private async Task ApplyBrowserDownloadPath(NativeDownload item, string targetPath)
+    {
+        string oldPath = item.FilePath;
+        if (String.Equals(Path.GetFullPath(oldPath), Path.GetFullPath(targetPath), StringComparison.OrdinalIgnoreCase)) { RenderDownloads(); return; }
+        bool finished = String.Equals(item.Status, "finished", StringComparison.OrdinalIgnoreCase);
+        CancellationTokenSource token;
+        if (!finished && transfers.TryGetValue(item.Id, out token)) { item.Status = "paused"; token.Cancel(); }
+        while (transfers.ContainsKey(item.Id)) await Task.Delay(80);
+        string folder = Path.GetDirectoryName(targetPath);
+        Directory.CreateDirectory(folder);
+        string name = Path.GetFileName(targetPath);
+        if (File.Exists(targetPath) || File.Exists(targetPath + ".fetchflow-part")) targetPath = ChoosePath(folder, name);
+        if (finished)
+        {
+            if (File.Exists(oldPath)) File.Move(oldPath, targetPath);
+        }
+        else
+        {
+            string oldPart = oldPath + ".fetchflow-part";
+            if (File.Exists(oldPart)) File.Move(oldPart, targetPath + ".fetchflow-part");
+        }
+        item.FilePath = targetPath; item.Folder = folder; item.Filename = Path.GetFileName(targetPath);
+        if (!finished)
+        {
+            item.Status = "queued"; item.Error = ""; SaveState();
+            if (!StartOne(item, true)) item.Status = "queued";
+        }
+        SaveState(); RenderDownloads();
+    }
+
+    private void NotifyBrowserHandoff(string handoff, string decision)
+    {
+        if (String.IsNullOrWhiteSpace(handoff) || !Regex.IsMatch(handoff, "^[a-fA-F0-9]{32}$")) return;
+        try
+        {
+            using (NamedPipeClientStream pipe = new NamedPipeClientStream(".", "FetchflowBrowser" + handoff, PipeDirection.Out))
+            {
+                pipe.Connect(5000);
+                using (StreamWriter writer = new StreamWriter(pipe, new UTF8Encoding(false)))
+                {
+                    writer.WriteLine(decision);
+                    writer.Flush();
+                }
+            }
+        }
+        catch (Exception error) { WriteLog("WARN", "Could not finish Chrome download handoff: " + error.Message); }
+    }
+
+    private static string GetDownloadsFolder()
+    {
+        Guid downloadsId = new Guid("374DE290-123F-4565-9164-39C4925E467B");
+        IntPtr pathPointer = IntPtr.Zero;
+        try
+        {
+            if (SHGetKnownFolderPath(ref downloadsId, 0, IntPtr.Zero, out pathPointer) == 0 && pathPointer != IntPtr.Zero)
+            {
+                string path = Marshal.PtrToStringUni(pathPointer);
+                if (!String.IsNullOrWhiteSpace(path)) return path;
+            }
+        }
+        catch { }
+        finally { if (pathPointer != IntPtr.Zero) CoTaskMemFree(pathPointer); }
+        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
+    }
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    private static extern int SHGetKnownFolderPath(ref Guid folderId, uint flags, IntPtr token, out IntPtr path);
+
+    [DllImport("ole32.dll")]
+    private static extern void CoTaskMemFree(IntPtr pointer);
 
     private static HttpClient CreateHttpClient()
     {
@@ -247,15 +811,16 @@ public sealed class NativeMainForm : Form
     private void InitializeTrayIcon()
     {
         ContextMenuStrip menu = new ContextMenuStrip();
-        menu.Items.Add("Open Fetchflow", null, delegate { RestoreFromTray(); });
+        menu.Items.Add("Open Fetchflow Download Manager", null, delegate { RestoreFromTray(); });
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("Exit Fetchflow", null, delegate { exitRequested = true; Close(); });
-        trayIcon = new NotifyIcon { Icon = SystemIcons.Application, Text = "Fetchflow is running", ContextMenuStrip = menu, Visible = false };
+        menu.Items.Add("Exit Fetchflow Download Manager", null, delegate { exitRequested = true; Close(); });
+        trayIcon = new NotifyIcon { Icon = Icon, Text = "Fetchflow Download Manager", ContextMenuStrip = menu, Visible = false };
         trayIcon.DoubleClick += delegate { RestoreFromTray(); };
     }
 
     private void HideToTray()
     {
+        WriteLog("INFO", "Window hidden to the notification area; active downloads continue.");
         if (trayIcon != null) trayIcon.Visible = true;
         Hide();
     }
@@ -266,6 +831,7 @@ public sealed class NativeMainForm : Form
         WindowState = FormWindowState.Normal;
         Activate();
         if (trayIcon != null) trayIcon.Visible = false;
+        WriteLog("INFO", "Fetchflow window restored from the notification area.");
     }
 
     private static void SetStartupRegistration(bool enabled)
@@ -313,6 +879,7 @@ public sealed class NativeMainForm : Form
         foreach (NativeDownload item in downloads)
         {
             if (item.Status == "downloading") item.Status = "paused";
+            if (item.Status == "retrying") { item.Status = "queued"; item.RetryAt = ""; item.Error = "Retry queued; start the queue to continue."; }
             if (item.Status == "paused") item.Error = "Paused when Fetchflow closed.";
             if (item.CompletedRanges == null) item.CompletedRanges = new List<long[]>();
         }
@@ -359,7 +926,7 @@ public sealed class NativeMainForm : Form
                 {
                     lock (item)
                     {
-                        return new NativeDownload { Id = item.Id, Url = item.Url, Filename = item.Filename, Host = item.Host, Folder = item.Folder, FilePath = item.FilePath, Size = item.Size, Bytes = item.Bytes, AcceptsRanges = item.AcceptsRanges, Status = item.Status, Error = item.Error, AddedAt = item.AddedAt, ETag = item.ETag, LastModified = item.LastModified, SegmentedMode = item.SegmentedMode, CompletedRanges = (item.CompletedRanges ?? new List<long[]>()).Select(r => new long[] { r[0], r[1] }).ToList() };
+                        return new NativeDownload { Id = item.Id, Url = item.Url, Filename = item.Filename, Host = item.Host, Folder = item.Folder, FilePath = item.FilePath, Size = item.Size, Bytes = item.Bytes, AcceptsRanges = item.AcceptsRanges, Status = item.Status, Error = item.Error, AddedAt = item.AddedAt, ETag = item.ETag, LastModified = item.LastModified, SegmentedMode = item.SegmentedMode, CompletedRanges = (item.CompletedRanges ?? new List<long[]>()).Select(r => new long[] { r[0], r[1] }).ToList(), RetryCount = item.RetryCount, RetryAt = item.RetryAt, IsYoutube = item.IsYoutube, MediaMode = item.MediaMode, MediaSelector = item.MediaSelector, MediaExtension = item.MediaExtension, MediaAudioQuality = item.MediaAudioQuality };
                     }
                 }).ToList()
             };
@@ -550,11 +1117,22 @@ public sealed class NativeMainForm : Form
         downloadGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Source", HeaderText = "SOURCE", Width = 140 });
         downloadGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Status", HeaderText = "STATUS", Width = 115 });
         downloadGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Progress", HeaderText = "PROGRESS", Width = 180 });
+        downloadGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Speed", HeaderText = "SPEED", Width = 95 });
         downloadGrid.CellMouseDown += DownloadGridCellMouseDown;
+        downloadGrid.CurrentCellChanged += delegate
+        {
+            if (downloadGrid.CurrentCell == null || downloadGrid.CurrentRow == null) return;
+            NativeDownload focused = downloadGrid.CurrentRow.Tag as NativeDownload;
+            if (focused != null)
+            {
+                focusedDownloadId = focused.Id;
+                focusedDownloadColumn = downloadGrid.CurrentCell.ColumnIndex;
+            }
+        };
         downloadGrid.CurrentCellDirtyStateChanged += delegate { if (downloadGrid.IsCurrentCellDirty) downloadGrid.CommitEdit(DataGridViewDataErrorContexts.Commit); };
         downloadGrid.CellValueChanged += DownloadGridCellValueChanged;
         layout.Controls.Add(downloadGrid, 0, 2);
-        Label note = new Label { Text = "Right-click a download for pause, resume, refresh, remove, and delete actions.", AutoSize = true, ForeColor = Color.FromArgb(108, 127, 139), Padding = new Padding(3, 8, 0, 0) };
+        Label note = new Label { Text = "Right-click a download to start it now, pause, resume, refresh, remove, or delete it.", AutoSize = true, ForeColor = Color.FromArgb(108, 127, 139), Padding = new Padding(3, 8, 0, 0) };
         layout.Controls.Add(note, 0, 3);
     }
 
@@ -593,7 +1171,7 @@ public sealed class NativeMainForm : Form
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         page.Controls.Add(layout);
-        Label instruction = new Label { Text = "Paste one direct HTTP or HTTPS file link per line", ForeColor = Color.FromArgb(174, 192, 200), AutoSize = true, Padding = new Padding(2, 8, 0, 0) };
+        Label instruction = new Label { Text = "Paste direct file links or public YouTube video links · only download content you own or are authorized to save", ForeColor = Color.FromArgb(174, 192, 200), AutoSize = true, Padding = new Padding(2, 8, 0, 0) };
         layout.Controls.Add(instruction, 0, 0);
         linksBox = new TextBox { Dock = DockStyle.Fill, Multiline = true, ScrollBars = ScrollBars.Vertical, AcceptsReturn = true, BackColor = Color.FromArgb(12, 18, 24), ForeColor = Color.FromArgb(215, 226, 231), BorderStyle = BorderStyle.FixedSingle, Font = new Font("Consolas", 9F) };
         layout.Controls.Add(linksBox, 0, 1);
@@ -607,6 +1185,7 @@ public sealed class NativeMainForm : Form
         grabGrid = CreateGrid();
         grabGrid.Columns.Add(new DataGridViewCheckBoxColumn { Name = "Selected", HeaderText = "✓", Width = 35 });
         grabGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Filename", HeaderText = "FILE NAME", AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill, MinimumWidth = 180 });
+        grabGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Quality", HeaderText = "FORMAT / QUALITY", Width = 230 });
         grabGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Host", HeaderText = "HOST", Width = 150 });
         grabGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Size", HeaderText = "SIZE", Width = 100 });
         grabGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Resume", HeaderText = "RESUME", Width = 90 });
@@ -656,6 +1235,7 @@ public sealed class NativeMainForm : Form
     private void BuildContextMenu()
     {
         downloadMenu = new ContextMenuStrip();
+        downloadMenu.Items.Add("Download now", null, delegate { RunContextAction("download-now"); });
         downloadMenu.Items.Add("Pause", null, delegate { RunContextAction("pause"); });
         downloadMenu.Items.Add("Resume", null, delegate { RunContextAction("resume"); });
         downloadMenu.Items.Add("Refresh link and resume…", null, async delegate { await RefreshLink(contextDownloadId); });
@@ -667,8 +1247,12 @@ public sealed class NativeMainForm : Form
         {
             NativeDownload item = downloads.FirstOrDefault(d => d.Id == contextDownloadId);
             if (item == null) { e.Cancel = true; return; }
-            downloadMenu.Items[0].Enabled = item.Status == "downloading" || item.Status == "queued";
-            downloadMenu.Items[1].Enabled = item.Status == "paused" || item.Status == "error";
+            downloadMenu.Items[0].Enabled = item.Status == "queued" || item.Status == "paused" || item.Status == "error";
+            downloadMenu.Items[1].Enabled = item.Status == "downloading" || item.Status == "queued";
+            downloadMenu.Items[2].Enabled = item.Status == "paused" || item.Status == "error";
+            downloadMenu.Items[3].Enabled = !item.IsYoutube && (item.Status == "downloading" || item.Status == "paused" || item.Status == "error");
+            downloadMenu.Items[5].Enabled = true;
+            downloadMenu.Items[6].Enabled = !String.IsNullOrWhiteSpace(item.FilePath);
         };
     }
 
@@ -679,6 +1263,12 @@ public sealed class NativeMainForm : Form
         downloadGrid.Rows[e.RowIndex].Selected = true;
         NativeDownload item = downloadGrid.Rows[e.RowIndex].Tag as NativeDownload;
         contextDownloadId = item == null ? null : item.Id;
+        if (item != null)
+        {
+            focusedDownloadId = item.Id;
+            focusedDownloadColumn = Math.Max(0, e.ColumnIndex);
+            downloadGrid.CurrentCell = downloadGrid.Rows[e.RowIndex].Cells[focusedDownloadColumn];
+        }
     }
 
     private void DownloadGridCellValueChanged(object sender, DataGridViewCellEventArgs e)
@@ -692,20 +1282,40 @@ public sealed class NativeMainForm : Form
 
     private void GrabGridCellValueChanged(object sender, DataGridViewCellEventArgs e)
     {
-        if (e.RowIndex < 0 || e.ColumnIndex != 0) return;
-        results[e.RowIndex].Selected = Convert.ToBoolean(grabGrid.Rows[e.RowIndex].Cells[0].Value);
+        if (e.RowIndex < 0 || e.RowIndex >= results.Count) return;
+        if (e.ColumnIndex == 0) results[e.RowIndex].Selected = Convert.ToBoolean(grabGrid.Rows[e.RowIndex].Cells[0].Value);
+        else if (e.ColumnIndex == 2) results[e.RowIndex].SelectedFormatKey = Convert.ToString(grabGrid.Rows[e.RowIndex].Cells[2].Value);
         addSelectedButton.Enabled = results.Any(r => r.Selected && String.IsNullOrEmpty(r.Error));
     }
 
     private void RenderDownloads()
     {
         if (downloadGrid == null) return;
+        string restoreId = focusedDownloadId;
+        int restoreColumn = focusedDownloadColumn;
+        if (downloadGrid.CurrentCell != null)
+        {
+            restoreColumn = downloadGrid.CurrentCell.ColumnIndex;
+            NativeDownload current = downloadGrid.CurrentRow == null ? null : downloadGrid.CurrentRow.Tag as NativeDownload;
+            if (current != null) restoreId = current.Id;
+        }
         downloadGrid.Rows.Clear();
         foreach (NativeDownload item in downloads)
         {
-            int row = downloadGrid.Rows.Add(selectedIds.Contains(item.Id), item.Filename, FormatBytes(item.Size), item.Host, StatusText(item), ProgressText(item));
+            int row = downloadGrid.Rows.Add(selectedIds.Contains(item.Id), item.Filename, FormatBytes(item.Size), item.Host, StatusText(item), ProgressText(item), "0 B/s");
             downloadGrid.Rows[row].Tag = item;
             downloadGrid.Rows[row].Cells[1].ToolTipText = item.Error ?? item.Url;
+        }
+        downloadGrid.ClearSelection();
+        int focusRow = downloads.FindIndex(item => item.Id == restoreId);
+        if (focusRow < 0 && downloads.Count > 0) focusRow = 0;
+        if (focusRow >= 0 && focusRow < downloadGrid.Rows.Count)
+        {
+            DataGridViewRow row = downloadGrid.Rows[focusRow];
+            focusedDownloadId = ((NativeDownload)row.Tag).Id;
+            focusedDownloadColumn = Math.Max(0, Math.Min(restoreColumn, row.Cells.Count - 1));
+            row.Selected = true;
+            downloadGrid.CurrentCell = row.Cells[focusedDownloadColumn];
         }
         downloadSummary.Text = downloads.Count + " download" + (downloads.Count == 1 ? "" : "s");
         UpdateSelectionUi();
@@ -723,7 +1333,9 @@ public sealed class NativeMainForm : Form
             downloadGrid.Rows[i].Cells[2].Value = FormatBytes(item.Size);
             downloadGrid.Rows[i].Cells[4].Value = StatusText(item);
             downloadGrid.Rows[i].Cells[5].Value = ProgressText(item);
-            totalSpeed += Math.Max(0, SampleCurrentSpeed(item));
+            long fileSpeed = item.Status == "downloading" ? Math.Max(0, item.IsYoutube ? Interlocked.Read(ref item.CurrentSpeed) : SampleCurrentSpeed(item)) : 0;
+            downloadGrid.Rows[i].Cells[6].Value = FormatBytes(fileSpeed) + "/s";
+            totalSpeed += fileSpeed;
         }
         speedSummary.Text = FormatBytes(totalSpeed) + "/s";
         UpdateSelectionUi();
@@ -762,8 +1374,14 @@ public sealed class NativeMainForm : Form
         grabGrid.Rows.Clear();
         foreach (GrabResult result in results)
         {
-            int row = grabGrid.Rows.Add(result.Selected && String.IsNullOrEmpty(result.Error), result.Filename, result.Host, result.Size > 0 ? FormatBytes(result.Size) : "Unknown", result.Ranges ? "Supported" : "Unknown", String.IsNullOrEmpty(result.Error) ? "Online" : result.Error);
+            int row = grabGrid.Rows.Add(result.Selected && String.IsNullOrEmpty(result.Error), result.Filename, result.IsYoutube ? "Loading formats…" : "Direct file", result.Host, result.Size > 0 ? FormatBytes(result.Size) : "Unknown", result.Ranges ? "Supported" : "Handled by yt-dlp", String.IsNullOrEmpty(result.Error) ? "Online" : result.Error);
             grabGrid.Rows[row].Tag = result;
+            if (result.IsYoutube && result.Formats != null && result.Formats.Count > 0)
+            {
+                DataGridViewComboBoxCell formatCell = new DataGridViewComboBoxCell { DataSource = result.Formats, DisplayMember = "Label", ValueMember = "Key", FlatStyle = FlatStyle.Flat };
+                grabGrid.Rows[row].Cells[2] = formatCell;
+                formatCell.Value = result.SelectedFormatKey;
+            }
         }
         addSelectedButton.Enabled = results.Any(r => r.Selected && String.IsNullOrEmpty(r.Error));
     }
@@ -815,7 +1433,7 @@ public sealed class NativeMainForm : Form
         queueArmed = false;
         foreach (NativeDownload item in downloads)
         {
-            if (item.Status == "queued") item.Status = "paused";
+            if (item.Status == "queued" || item.Status == "retrying") { item.Status = "paused"; item.RetryAt = ""; item.Error = ""; }
             CancellationTokenSource token;
             if (transfers.TryGetValue(item.Id, out token)) { item.Status = "paused"; token.Cancel(); }
         }
@@ -830,7 +1448,8 @@ public sealed class NativeMainForm : Form
             if (!queueArmed || closing) return;
             while (running.Count < settings.Concurrency)
             {
-                NativeDownload next = downloads.FirstOrDefault(d => d.Status == "queued" && (!runningHosts.ContainsKey(d.Host) || runningHosts[d.Host] < settings.PerHost));
+                NativeDownload next = downloads.Where(d => d.Status == "queued" && (!runningHosts.ContainsKey(d.Host) || runningHosts[d.Host] < settings.PerHost)).OrderByDescending(d => d.RetryCount > 0).FirstOrDefault();
+                if (downloads.Any(d => d.Status == "retrying" && d.RetryCount <= MaxAutomaticRetries)) break;
                 if (next == null) break;
                 next.Status = "downloading"; next.Error = "";
                 running.Add(next.Id); AddRunningHost(next.Host, 1);
@@ -853,10 +1472,27 @@ public sealed class NativeMainForm : Form
         CancellationTokenSource token; if (transfers.TryRemove(item.Id, out token)) token.Dispose();
         if (task.IsCanceled || task.Exception != null)
         {
-            if (item.Status != "paused") { item.Status = "error"; item.Error = task.Exception == null ? "Download canceled." : task.Exception.GetBaseException().Message; }
+            if (item.Status != "paused" && item.Status != "retrying") { item.Status = "error"; item.Error = task.Exception == null ? "Download canceled." : task.Exception.GetBaseException().Message; }
         }
-        else { item.Status = "finished"; item.Error = ""; item.Bytes = item.Size; item.CompletedRanges = new List<long[]>(); item.SegmentedMode = false; }
+        else { item.Status = "finished"; item.Error = ""; item.RetryCount = 0; item.RetryAt = ""; item.Bytes = item.Size; item.CompletedRanges = new List<long[]>(); item.SegmentedMode = false; }
         SaveState(); RenderDownloads();
+        if (item.Status == "retrying")
+        {
+            if (item.RetryCount <= MaxAutomaticRetries)
+            {
+                int delay = RetryDelaySeconds(item.RetryCount);
+                WriteLog("WARN", item.Host + ": temporary download failure; retry " + item.RetryCount + " of " + MaxAutomaticRetries + " scheduled in " + delay + " seconds. " + item.Error);
+                ScheduleRetry(item, delay);
+            }
+            else
+            {
+                item.Status = "error";
+                item.RetryAt = "";
+                item.Error = "Automatic retries exhausted after " + MaxAutomaticRetries + " retries. " + item.Error;
+                WriteLog("ERROR", item.Host + ": automatic retries exhausted; moving to the next queued download.");
+                SaveState(); RenderDownloads();
+            }
+        }
         PumpQueue();
     }
 
@@ -867,17 +1503,88 @@ public sealed class NativeMainForm : Form
             if (String.IsNullOrWhiteSpace(item.Folder)) item.Folder = settings.Folder;
             if (String.IsNullOrWhiteSpace(item.FilePath)) item.FilePath = ChoosePath(item.Folder, item.Filename);
             string part = item.FilePath + ".fetchflow-part";
+            if (item.IsYoutube)
+            {
+                await TransferYoutube(item, cancel);
+                return;
+            }
+            bool hasSavedSegmentState = item.SegmentedMode || (item.CompletedRanges != null && item.CompletedRanges.Count > 0);
             if (await TransferSegments(item, part, cancel))
             {
                 FinalizeFile(item, part);
                 return;
             }
+            if (hasSavedSegmentState)
+                throw new IOException("The server no longer supports the saved ranged download. The partial file was kept; Fetchflow will not restart it from the beginning automatically.");
             await TransferSingle(item, part, cancel);
             FinalizeFile(item, part);
         }
-        catch (OperationCanceledException) { item.Status = "paused"; item.Error = ""; throw; }
-        catch (Exception error) { item.Status = "error"; item.Error = error.Message; throw; }
+        catch (OperationCanceledException error)
+        {
+            if (cancel.IsCancellationRequested) { item.Status = "paused"; item.Error = ""; }
+            else MarkTransferFailure(item, error);
+            throw;
+        }
+        catch (Exception error)
+        {
+            MarkTransferFailure(item, error);
+            throw;
+        }
         finally { SaveState(); }
+    }
+
+    private static void MarkTransferFailure(NativeDownload item, Exception error)
+    {
+        if (IsTransientDownloadError(error))
+        {
+            item.RetryCount++;
+            int delay = RetryDelaySeconds(item.RetryCount);
+            item.Status = "retrying";
+            item.RetryAt = DateTime.UtcNow.AddSeconds(delay).ToString("o");
+            item.Error = "Temporary connection/server issue after " + FormatBytes(item.Bytes) + " saved progress. Retry " + item.RetryCount + " in " + delay + " seconds: " + error.Message;
+        }
+        else { item.Status = "error"; item.Error = error.Message; }
+    }
+
+    private static int RetryDelaySeconds(int attempt) { return Math.Min(60, 3 * (int)Math.Pow(2, Math.Min(5, Math.Max(0, attempt - 1)))); }
+
+    private static bool IsTransientDownloadError(Exception error)
+    {
+        for (Exception current = error; current != null; current = current.InnerException)
+        {
+            if (current is HttpRequestException || current is SocketException || current is TimeoutException || current is EndOfStreamException) return true;
+            if (current is TaskCanceledException) return true;
+            string message = current.Message ?? "";
+            ObjectDisposedException disposed = current as ObjectDisposedException;
+            if (disposed != null && (String.Equals(disposed.ObjectName, "System.Net.Security.SslStream", StringComparison.OrdinalIgnoreCase) || message.IndexOf("SslStream", StringComparison.OrdinalIgnoreCase) >= 0)) return true;
+            Match status = Regex.Match(message, @"(?:HTTP(?:\s+Error)?|responded)\s+(\d{3})", RegexOptions.IgnoreCase);
+            if (status.Success)
+            {
+                int code;
+                if (Int32.TryParse(status.Groups[1].Value, out code)) return code == 408 || code == 425 || code == 429 || code >= 500;
+            }
+            if (current is IOException && (message.IndexOf("closed a file range before all requested bytes arrived", StringComparison.OrdinalIgnoreCase) >= 0 || message.IndexOf("connection was closed", StringComparison.OrdinalIgnoreCase) >= 0 || message.IndexOf("unexpected end", StringComparison.OrdinalIgnoreCase) >= 0)) return true;
+        }
+        return false;
+    }
+
+    private void ScheduleRetry(NativeDownload item, int seconds)
+    {
+        Task.Run(async () =>
+        {
+            await Task.Delay(TimeSpan.FromSeconds(seconds));
+            try
+            {
+                if (IsDisposed || !IsHandleCreated || closing) return;
+                BeginInvoke((Action)(() =>
+                {
+                    if (closing || !downloads.Contains(item) || item.Status != "retrying") return;
+                    if (!StartOne(item)) ScheduleRetry(item, 1);
+                    RenderDownloads();
+                }));
+            }
+            catch (InvalidOperationException) { }
+        });
     }
 
     private async Task<bool> TransferSegments(NativeDownload item, string part, CancellationToken cancel)
@@ -885,6 +1592,7 @@ public sealed class NativeMainForm : Form
         int connections = Clamp(settings.ConnectionsPerFile, 1, 16);
         if ((connections < 2 && !item.SegmentedMode && (item.CompletedRanges == null || item.CompletedRanges.Count == 0)) || !item.AcceptsRanges || item.Size <= 0) return false;
         List<long[]> ranges = item.CompletedRanges ?? new List<long[]>();
+        bool serverReturnsThroughEnd = false;
         if (ranges.Count == 0 && !item.SegmentedMode && File.Exists(part))
         {
             long existing = Math.Min(item.Size, new FileInfo(part).Length);
@@ -893,11 +1601,22 @@ public sealed class NativeMainForm : Form
         using (HttpResponseMessage probe = await GetRange(item.Url, 0, 0, null, cancel))
         {
             ContentRangeHeaderValue contentRange = probe.Content.Headers.ContentRange;
-            if (probe.StatusCode != HttpStatusCode.PartialContent || contentRange == null || contentRange.From != 0 || contentRange.To != 0 || contentRange.Length != item.Size)
+            string rangeText = contentRange == null ? "missing" : contentRange.ToString();
+            WriteLog("INFO", item.Host + ": resume probe returned HTTP " + (int)probe.StatusCode + ", Content-Range " + rangeText + ", saved size " + item.Size + ".");
+            bool validProbe = probe.StatusCode == HttpStatusCode.PartialContent && contentRange != null && contentRange.From == 0 && contentRange.To >= 0 && (!contentRange.Length.HasValue || contentRange.To < contentRange.Length.Value);
+            if (!validProbe)
             {
-                if (item.SegmentedMode || ranges.Count > 0) throw new IOException("This server no longer supports safe ranged resume. The partial file was kept.");
+                if (item.SegmentedMode || ranges.Count > 0) throw new IOException("Could not verify ranged resume: server returned HTTP " + (int)probe.StatusCode + " with Content-Range " + rangeText + "; expected HTTP 206 for bytes 0-0. The partial file was kept.");
                 return false;
             }
+            if (contentRange.Length.HasValue && item.Size > 0 && contentRange.Length.Value != item.Size)
+            {
+                if (item.SegmentedMode || ranges.Count > 0) throw new IOException("The server reports a different file size (" + FormatBytes(contentRange.Length.Value) + ") than the saved download (" + FormatBytes(item.Size) + "). The partial file was kept because its contents cannot be safely matched.");
+                item.Size = contentRange.Length.Value;
+                WriteLog("WARN", item.Host + ": updated the unsaved download size from the server's range response.");
+            }
+            serverReturnsThroughEnd = item.Size > 0 && contentRange.To >= item.Size - 1;
+            if (contentRange.To > 0) WriteLog("INFO", item.Host + ": server returned a wider range than requested; Fetchflow will adapt its range strategy.");
             string tag = probe.Headers.ETag == null ? "" : probe.Headers.ETag.ToString();
             string modified = probe.Content.Headers.LastModified.HasValue ? probe.Content.Headers.LastModified.Value.ToString("R") : "";
             if (!String.IsNullOrEmpty(item.ETag) && !String.IsNullOrEmpty(tag) && item.ETag != tag) throw new IOException("The server content changed; the partial file was kept.");
@@ -911,6 +1630,15 @@ public sealed class NativeMainForm : Form
         item.CompletedRanges = MergeRanges(ranges);
         List<long[]> todo = MissingRanges(item.Size, connections, item.CompletedRanges);
         if (todo.Count == 0) return true;
+        if (serverReturnsThroughEnd)
+        {
+            // Some hosts ignore the requested end and stream from the requested start through EOF.
+            // Read that tail once, instead of opening overlapping streams and disposing them early.
+            long firstMissingByte = todo[0][0];
+            todo = new List<long[]> { new long[] { firstMissingByte, item.Size - 1 } };
+            connections = 1;
+            WriteLog("INFO", item.Host + ": server sends ranges through EOF; resuming from byte " + firstMissingByte + " in one stream.");
+        }
         long[] active = new long[connections];
         SemaphoreSlim slots = new SemaphoreSlim(connections);
         List<Task> jobs = new List<Task>();
@@ -936,21 +1664,42 @@ public sealed class NativeMainForm : Form
         using (HttpResponseMessage response = await GetRange(item.Url, start, end, item, cancel))
         {
             ContentRangeHeaderValue actual = response.Content.Headers.ContentRange;
-            if (response.StatusCode != HttpStatusCode.PartialContent || actual == null || actual.From != start || actual.To != end || actual.Length != item.Size) throw new IOException("The server did not return the requested file range.");
+            if (response.StatusCode != HttpStatusCode.PartialContent || actual == null || actual.From != start || actual.To < end || (actual.Length.HasValue && actual.To >= actual.Length.Value))
+            {
+                string rangeText = actual == null ? "missing" : actual.ToString();
+                throw new IOException("The server returned HTTP " + (int)response.StatusCode + " with Content-Range " + rangeText + " instead of the requested bytes " + start + "-" + end + ". The partial file was kept.");
+            }
+            if (actual.Length.HasValue && item.Size > 0 && actual.Length.Value != item.Size)
+                throw new IOException("The server reported a different total file size during resume. The partial file was kept.");
+            if (actual.To != end) WriteLog("INFO", item.Host + ": requested bytes " + start + "-" + end + ", server supplied " + actual.From + "-" + actual.To + "; reading only the requested segment.");
+            WriteLog("INFO", item.Host + ": opened range stream at byte " + start + " through byte " + actual.To + ".");
             string tag = response.Headers.ETag == null ? "" : response.Headers.ETag.ToString();
             if (!String.IsNullOrEmpty(item.ETag) && !String.IsNullOrEmpty(tag) && item.ETag != tag) throw new IOException("The server returned changed content for a file range.");
             using (Stream input = await response.Content.ReadAsStreamAsync())
             using (FileStream output = new FileStream(part, FileMode.Open, FileAccess.Write, FileShare.ReadWrite))
             {
                 output.Position = start;
-                byte[] buffer = new byte[64 * 1024]; long position = start; Stopwatch watch = Stopwatch.StartNew(); long throttledBytes = 0;
-                while (true)
+                byte[] buffer = new byte[64 * 1024]; long position = start; long lastStateSavePosition = start; Stopwatch watch = Stopwatch.StartNew(); long throttledBytes = 0;
+                while (position <= end)
                 {
-                    int read = await input.ReadAsync(buffer, 0, buffer.Length, cancel);
+                    int requested = (int)Math.Min((long)buffer.Length, end + 1 - position);
+                    int read = await ReadWithIdleTimeout(input, buffer, 0, requested, cancel);
                     if (read == 0) break;
                     await output.WriteAsync(buffer, 0, read, cancel);
-                    position += read; active[slot] = position - start; throttledBytes += read;
-                    lock (item) item.Bytes = CountRanges(item.CompletedRanges) + active.Sum();
+                    position += read; throttledBytes += read;
+                    lock (item)
+                    {
+                        // Record written bytes, not just fully completed segments, so a retry resumes at the gap.
+                        item.CompletedRanges = MergeRanges((item.CompletedRanges ?? new List<long[]>()).Concat(new[] { new long[] { start, position - 1 } }).ToList());
+                        active[slot] = 0;
+                        item.Bytes = CountRanges(item.CompletedRanges) + active.Sum();
+                    }
+                    if (position - lastStateSavePosition >= 8 * 1024 * 1024)
+                    {
+                        SaveState();
+                        lastStateSavePosition = position;
+                        WriteLog("INFO", item.Host + ": saved range progress through byte " + (position - 1) + ".");
+                    }
                     RecordSpeedBytes(item, read);
                     Throttle(watch, throttledBytes, Math.Max(1, Math.Min(settings.ConnectionsPerFile, running.Count)), cancel);
                 }
@@ -986,14 +1735,19 @@ public sealed class NativeMainForm : Form
         HttpResponseMessage response = await GetRange(item.Url, offset, null, item, cancel);
         if (offset > 0 && response.StatusCode != HttpStatusCode.PartialContent)
         {
-            response.Dispose(); offset = 0;
-            response = await GetRange(item.Url, null, null, null, cancel);
+            response.Dispose();
+            throw new IOException("The server no longer supports ranged resume. The partial file was kept; Fetchflow will not restart from the beginning automatically.");
         }
         using (response)
         {
             if (!response.IsSuccessStatusCode) throw new IOException("Server responded " + (int)response.StatusCode + " " + response.ReasonPhrase + ".");
             if (offset > 0 && (response.Content.Headers.ContentRange == null || response.Content.Headers.ContentRange.From != offset)) throw new IOException("The server did not resume at the saved byte offset.");
-            if (response.Content.Headers.ContentRange != null && response.Content.Headers.ContentRange.Length.HasValue) item.Size = response.Content.Headers.ContentRange.Length.Value;
+            if (response.Content.Headers.ContentRange != null && response.Content.Headers.ContentRange.Length.HasValue)
+            {
+                long serverSize = response.Content.Headers.ContentRange.Length.Value;
+                if (offset > 0 && item.Size > 0 && serverSize != item.Size) throw new IOException("The server reports a different file size than the saved partial download. The partial file was kept.");
+                item.Size = serverSize;
+            }
             else if (response.Content.Headers.ContentLength.HasValue && offset == 0) item.Size = response.Content.Headers.ContentLength.Value;
             if (response.Headers.ETag != null) item.ETag = response.Headers.ETag.ToString();
             if (response.Content.Headers.LastModified.HasValue) item.LastModified = response.Content.Headers.LastModified.Value.ToString("R");
@@ -1003,7 +1757,7 @@ public sealed class NativeMainForm : Form
                 output.Position = offset; byte[] buffer = new byte[64 * 1024]; Stopwatch watch = Stopwatch.StartNew(); long bytes = 0;
                 while (true)
                 {
-                    int read = await input.ReadAsync(buffer, 0, buffer.Length, cancel);
+                    int read = await ReadWithIdleTimeout(input, buffer, 0, buffer.Length, cancel);
                     if (read == 0) break;
                     await output.WriteAsync(buffer, 0, read, cancel);
                     bytes += read; item.Bytes = offset + bytes; RecordSpeedBytes(item, read);
@@ -1024,8 +1778,34 @@ public sealed class NativeMainForm : Form
             if (!String.IsNullOrWhiteSpace(validator.ETag)) { EntityTagHeaderValue tag; if (EntityTagHeaderValue.TryParse(validator.ETag, out tag)) request.Headers.IfRange = new RangeConditionHeaderValue(tag); }
             else if (!String.IsNullOrWhiteSpace(validator.LastModified)) { DateTimeOffset modified; if (DateTimeOffset.TryParse(validator.LastModified, out modified)) request.Headers.IfRange = new RangeConditionHeaderValue(modified); }
         }
-        try { return await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancel); }
+        try
+        {
+            using (CancellationTokenSource headers = CancellationTokenSource.CreateLinkedTokenSource(cancel))
+            {
+                headers.CancelAfter(TimeSpan.FromSeconds(45));
+                try { return await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, headers.Token); }
+                catch (OperationCanceledException error)
+                {
+                    if (cancel.IsCancellationRequested) throw;
+                    throw new TimeoutException("The server did not send response headers within 45 seconds.", error);
+                }
+            }
+        }
         catch { request.Dispose(); throw; }
+    }
+
+    private static async Task<int> ReadWithIdleTimeout(Stream input, byte[] buffer, int offset, int count, CancellationToken cancel)
+    {
+        using (CancellationTokenSource idle = CancellationTokenSource.CreateLinkedTokenSource(cancel))
+        {
+            idle.CancelAfter(TimeSpan.FromSeconds(45));
+            try { return await input.ReadAsync(buffer, offset, count, idle.Token); }
+            catch (OperationCanceledException error)
+            {
+                if (cancel.IsCancellationRequested) throw;
+                throw new TimeoutException("The connection delivered no download data for 45 seconds.", error);
+            }
+        }
     }
 
     private async Task CheckLinks()
@@ -1039,13 +1819,29 @@ public sealed class NativeMainForm : Form
         WriteLog("INFO", "Starting link check for " + urls.Count + " link(s). Up to 8 links are checked at once; each request times out after 20 seconds.");
         try
         {
+            string ytDlp = null;
+            string youtubeSetupError = null;
+            if (urls.Any(IsYoutubeUrl))
+            {
+                checkLinksButton.Text = "Preparing YouTube support…";
+                try { ytDlp = await EnsureYoutubeExtractor(); }
+                catch (Exception error) { youtubeSetupError = "Could not set up the official YouTube media helper: " + error.Message; WriteLog("ERROR", youtubeSetupError); }
+            }
             using (SemaphoreSlim limit = new SemaphoreSlim(8))
             {
                 int completed = 0;
                 List<Task<GrabResult>> tasks = urls.Select(async url =>
                 {
                     await limit.WaitAsync();
-                    try { return await InspectLink(url); }
+                    try
+                    {
+                        if (IsYoutubeUrl(url))
+                        {
+                            if (ytDlp == null) return new GrabResult { Url = url, Host = "youtube.com", Filename = "YouTube video", Error = youtubeSetupError ?? "YouTube support is unavailable." };
+                            return await InspectYoutube(url, ytDlp);
+                        }
+                        return await InspectLink(url);
+                    }
                     finally
                     {
                         limit.Release();
@@ -1062,6 +1858,265 @@ public sealed class NativeMainForm : Form
         }
         catch (Exception error) { WriteLog("ERROR", "Link check failed: " + error.GetType().Name + ": " + error.Message); }
         finally { checkLinksButton.Enabled = true; checkLinksButton.Text = "⌕  Check links"; }
+    }
+
+    private static bool IsYoutubeUrl(string value)
+    {
+        Uri uri;
+        if (!Uri.TryCreate((value ?? "").Trim(), UriKind.Absolute, out uri) || (uri.Scheme != "http" && uri.Scheme != "https")) return false;
+        string host = uri.Host.ToLowerInvariant();
+        return host == "youtube.com" || host.EndsWith(".youtube.com", StringComparison.Ordinal) || host == "youtu.be" || host == "youtube-nocookie.com" || host.EndsWith(".youtube-nocookie.com", StringComparison.Ordinal);
+    }
+
+    private async Task<string> EnsureYoutubeExtractor()
+    {
+        string toolFolder = Path.Combine(appData, "tools");
+        string target = Path.Combine(toolFolder, "yt-dlp.exe");
+        string temp = target + ".download";
+        Directory.CreateDirectory(toolFolder);
+        const string sumsUrl = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA2-256SUMS";
+        const string binaryUrl = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
+        string sums = await Http.GetStringAsync(sumsUrl);
+        Match match = Regex.Match(sums, @"(?im)^([a-f0-9]{64})\s+\*?yt-dlp\.exe\s*$");
+        if (!match.Success) throw new InvalidDataException("The official release checksum list did not contain yt-dlp.exe.");
+        string expected = match.Groups[1].Value.ToLowerInvariant();
+        if (File.Exists(target) && String.Equals(FileHash(target), expected, StringComparison.OrdinalIgnoreCase)) return target;
+        WriteLog("INFO", "Downloading yt-dlp from the official yt-dlp GitHub release and verifying SHA-256.");
+        try
+        {
+            using (HttpResponseMessage response = await Http.GetAsync(binaryUrl, HttpCompletionOption.ResponseHeadersRead))
+            {
+                response.EnsureSuccessStatusCode();
+                using (Stream input = await response.Content.ReadAsStreamAsync())
+                using (FileStream output = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None)) await input.CopyToAsync(output);
+            }
+            if (!String.Equals(FileHash(temp), expected, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("The downloaded yt-dlp file did not match the official SHA-256 checksum.");
+            if (File.Exists(target)) File.Delete(target);
+            File.Move(temp, target);
+            WriteLog("INFO", "Official yt-dlp helper is ready.");
+            return target;
+        }
+        catch { TryDelete(temp); throw; }
+    }
+
+    private static string FileHash(string path)
+    {
+        using (SHA256 hash = SHA256.Create())
+        using (FileStream input = File.OpenRead(path)) return BitConverter.ToString(hash.ComputeHash(input)).Replace("-", "").ToLowerInvariant();
+    }
+
+    private async Task<GrabResult> InspectYoutube(string value, string ytDlp)
+    {
+        Uri uri = new Uri(value);
+        GrabResult result = new GrabResult { Url = value, Host = uri.Host, IsYoutube = true, Ranges = false };
+        string stdout = "";
+        string stderr = "";
+        using (Process process = new Process())
+        {
+            process.StartInfo = new ProcessStartInfo { FileName = ytDlp, Arguments = "--no-playlist --no-warnings --skip-download --dump-single-json " + QuoteArgument(value), UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+            process.Start();
+            Task<string> output = process.StandardOutput.ReadToEndAsync();
+            Task<string> errors = process.StandardError.ReadToEndAsync();
+            Task wait = Task.Run(() => process.WaitForExit());
+            if (await Task.WhenAny(wait, Task.Delay(TimeSpan.FromSeconds(90))) != wait)
+            {
+                try { process.Kill(); } catch { }
+                result.Error = "YouTube format inspection timed out after 90 seconds.";
+                WriteLog("WARN", "YouTube inspection timed out for " + uri.Host + ".");
+                return result;
+            }
+            stdout = await output; stderr = await errors;
+            if (process.ExitCode != 0) { result.Error = SafeExtractorError(stderr); return result; }
+        }
+        try
+        {
+            byte[] json = Encoding.UTF8.GetBytes(stdout);
+            using (MemoryStream stream = new MemoryStream(json))
+            {
+                YtVideoInfo info = (YtVideoInfo)new DataContractJsonSerializer(typeof(YtVideoInfo)).ReadObject(stream);
+                result.Filename = SafeFileName(String.IsNullOrWhiteSpace(info.Title) ? "YouTube video" : info.Title);
+                result.Formats = BuildYoutubeFormats(info.Formats ?? new List<YtVideoFormat>(), FindFfmpeg() != null);
+                result.Selected = result.Formats.Count > 0;
+                result.SelectedFormatKey = result.Formats.Count == 0 ? null : result.Formats[0].Key;
+                if (!result.Selected) result.Error = "No downloadable formats were reported for this video.";
+            }
+        }
+        catch (Exception error) { result.Error = "Could not read YouTube format details: " + error.Message; }
+        WriteLog(String.IsNullOrEmpty(result.Error) ? "INFO" : "WARN", "YouTube formats " + uri.Host + ": " + (String.IsNullOrEmpty(result.Error) ? result.Formats.Count + " choices found." : result.Error));
+        return result;
+    }
+
+    private static List<YtFormatChoice> BuildYoutubeFormats(List<YtVideoFormat> formats, bool hasFfmpeg)
+    {
+        List<YtFormatChoice> choices = new List<YtFormatChoice>();
+        Func<YtVideoFormat, bool> hasVideo = f => !String.IsNullOrEmpty(f.VideoCodec) && f.VideoCodec != "none";
+        Func<YtVideoFormat, bool> hasAudio = f => !String.IsNullOrEmpty(f.AudioCodec) && f.AudioCodec != "none";
+        foreach (YtVideoFormat f in formats.Where(f => hasVideo(f) && hasAudio(f) && !String.IsNullOrWhiteSpace(f.Id)).GroupBy(f => (f.HeightValue > 0 ? f.HeightValue.ToString() : "0") + "|" + f.Extension).Select(g => g.OrderByDescending(x => x.AudioBitrateValue).First()).OrderByDescending(f => f.HeightValue).Take(18))
+        {
+            string ext = SafeExtension(f.Extension);
+            string label = "Video · " + (f.HeightValue > 0 ? f.HeightValue + "p" : "Available quality") + " · " + ext;
+            choices.Add(new YtFormatChoice { Key = "video|" + f.Id, Label = label, Selector = f.Id, Mode = "video", Extension = ext });
+        }
+        foreach (YtVideoFormat f in formats.Where(f => hasVideo(f) && !hasAudio(f) && !String.IsNullOrWhiteSpace(f.Id)).GroupBy(f => f.HeightValue).Select(g => g.OrderByDescending(x => x.Id).First()).OrderByDescending(f => f.HeightValue).Take(12))
+        {
+            string ext = "mp4";
+            string mergeLabel = hasFfmpeg ? " · merge audio" : " · merge audio (FFmpeg required)";
+            choices.Add(new YtFormatChoice { Key = "video-merge|" + f.Id, Label = "Video · " + (f.HeightValue > 0 ? f.HeightValue + "p" : "High quality") + " · " + ext + mergeLabel, Selector = f.Id + "+bestaudio", Mode = "video", Extension = ext, RequiresFfmpeg = true });
+        }
+        foreach (YtVideoFormat f in formats.Where(f => !hasVideo(f) && hasAudio(f) && !String.IsNullOrWhiteSpace(f.Id)).GroupBy(f => SafeExtension(f.Extension) + "|" + Math.Round(f.AudioBitrateValue / 16) * 16).Select(g => g.OrderByDescending(x => x.AudioBitrateValue).First()).OrderByDescending(f => f.AudioBitrateValue).Take(12))
+        {
+            string ext = SafeExtension(f.Extension);
+            choices.Add(new YtFormatChoice { Key = "audio|" + f.Id, Label = "Audio · " + ext.ToUpperInvariant() + (f.AudioBitrateValue > 0 ? " · " + Math.Round(f.AudioBitrateValue) + " kbps" : ""), Selector = f.Id, Mode = "audio", Extension = ext });
+        }
+        foreach (string bitrate in new[] { "320k", "256k", "192k", "128k" }) choices.Add(new YtFormatChoice { Key = "mp3|" + bitrate, Label = "Audio · MP3 · " + bitrate, Selector = "bestaudio", Mode = "mp3", Extension = "mp3", AudioQuality = bitrate, RequiresFfmpeg = true });
+        return choices;
+    }
+
+    private static string SafeExtension(string extension)
+    {
+        string value = (extension ?? "").ToLowerInvariant();
+        return Regex.IsMatch(value, "^[a-z0-9]{1,8}$") ? value : "mp4";
+    }
+
+    private static string QuoteArgument(string value)
+    {
+        return "\"" + (value ?? "").Replace("\"", "\\\"") + "\"";
+    }
+
+    private static string SafeExtractorError(string message)
+    {
+        string safe = Regex.Replace(message ?? "", @"https?://\S+", "[link]", RegexOptions.IgnoreCase);
+        string[] lines = safe.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+        string detail = lines.LastOrDefault(line => line.IndexOf("ERROR:", StringComparison.OrdinalIgnoreCase) >= 0) ?? lines.LastOrDefault() ?? "The media helper could not read this video.";
+        return Regex.Replace(detail.Trim(), "ERROR:", "", RegexOptions.IgnoreCase).Trim();
+    }
+
+    private async Task TransferYoutube(NativeDownload item, CancellationToken cancel)
+    {
+        string ytDlp = Path.Combine(appData, "tools", "yt-dlp.exe");
+        if (!File.Exists(ytDlp)) ytDlp = await EnsureYoutubeExtractor();
+        if ((item.MediaMode == "mp3" || item.MediaSelector.Contains("+")) && FindFfmpeg() == null)
+            throw new InvalidOperationException("This format needs FFmpeg. Install FFmpeg and restart Fetchflow, or choose an audio format that does not need conversion.");
+        if (String.IsNullOrWhiteSpace(item.Folder)) item.Folder = settings.Folder;
+        if (String.IsNullOrWhiteSpace(item.FilePath)) item.FilePath = ChoosePath(item.Folder, item.Filename);
+        Directory.CreateDirectory(item.Folder);
+        string stem = Path.Combine(Path.GetDirectoryName(item.FilePath), Path.GetFileNameWithoutExtension(item.FilePath));
+        string outputTemplate = stem + ".%(ext)s";
+        string args = "--no-playlist --newline --no-warnings --continue --windows-filenames --format " + QuoteArgument(item.MediaSelector) +
+            " --output " + QuoteArgument(outputTemplate) +
+            " --progress --progress-delta 0.5 --output-na-placeholder NA" +
+            " --progress-template " + QuoteArgument("download:FFPROGRESS:%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress._percent_str)s") +
+            " --print " + QuoteArgument("after_move:FFPATH:%(filepath)s");
+        if (item.MediaMode == "mp3") args += " --extract-audio --audio-format mp3 --audio-quality " + QuoteArgument(String.IsNullOrWhiteSpace(item.MediaAudioQuality) ? "192k" : item.MediaAudioQuality);
+        if (item.MediaMode == "video" && item.MediaSelector.Contains("+")) args += " --merge-output-format " + SafeExtension(item.MediaExtension);
+        string ffmpeg = FindFfmpeg();
+        if (ffmpeg != null && (item.MediaMode == "mp3" || item.MediaSelector.Contains("+"))) args += " --ffmpeg-location " + QuoteArgument(Path.GetDirectoryName(ffmpeg));
+        args += " " + QuoteArgument(item.Url);
+        StringBuilder output = new StringBuilder();
+        object outputLock = new object();
+        string finalPath = null;
+        using (Process process = new Process())
+        {
+            process.StartInfo = new ProcessStartInfo { FileName = ytDlp, Arguments = args, WorkingDirectory = item.Folder, UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+            DataReceivedEventHandler lineHandler = delegate(object sender, DataReceivedEventArgs e)
+            {
+                if (e.Data == null) return;
+                if (e.Data.StartsWith("FFPROGRESS:", StringComparison.Ordinal))
+                {
+                    string[] fields = e.Data.Substring(11).Split('|');
+                    double parsed;
+                    long downloaded;
+                    if (fields.Length >= 1 && Double.TryParse(fields[0], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out parsed))
+                    {
+                        downloaded = Math.Max(0, (long)parsed);
+                        item.Bytes = downloaded;
+                    }
+                    long total;
+                    if (fields.Length >= 3 && Int64.TryParse(fields[1], out total) && total > 0) item.Size = total;
+                    else if (fields.Length >= 3 && Int64.TryParse(fields[2], out total) && total > 0) item.Size = total;
+                    double speed;
+                    if (fields.Length >= 4 && Double.TryParse(fields[3], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out speed)) Interlocked.Exchange(ref item.CurrentSpeed, Math.Max(0, (long)speed));
+                    // Some extractors cannot estimate the final size. Use their reported
+                    // percentage to provide a useful approximate total in the UI.
+                    if (item.Size <= item.Bytes && fields.Length >= 5)
+                    {
+                        string percentText = fields[4].Replace("%", "").Trim();
+                        double percent;
+                        if (Double.TryParse(percentText, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out percent) && percent > 0 && percent <= 100)
+                            item.Size = Math.Max(item.Bytes, (long)(item.Bytes * 100.0 / percent));
+                    }
+                    return;
+                }
+                if (e.Data.StartsWith("FFPATH:", StringComparison.Ordinal)) { finalPath = e.Data.Substring(7).Trim().Trim('"'); return; }
+                lock (outputLock) output.AppendLine(Regex.Replace(e.Data, @"https?://\S+", "[link]", RegexOptions.IgnoreCase));
+            };
+            process.OutputDataReceived += lineHandler;
+            process.ErrorDataReceived += lineHandler;
+            process.Start();
+            process.BeginOutputReadLine(); process.BeginErrorReadLine();
+            Task wait = Task.Run(() => process.WaitForExit());
+            while (await Task.WhenAny(wait, Task.Delay(250)) != wait)
+            {
+                if (cancel.IsCancellationRequested)
+                {
+                    try { process.Kill(); } catch { }
+                    throw new OperationCanceledException(cancel);
+                }
+            }
+            process.WaitForExit();
+            if (cancel.IsCancellationRequested) throw new OperationCanceledException(cancel);
+            if (process.ExitCode != 0)
+            {
+                string detail;
+                lock (outputLock) detail = SafeExtractorError(output.ToString());
+                Match status = Regex.Match(detail, @"HTTP(?:\s+Error)?\s+(408|425|429|5\d\d)", RegexOptions.IgnoreCase);
+                if (status.Success) throw new HttpRequestException(detail);
+                if (detail.IndexOf("timed out", StringComparison.OrdinalIgnoreCase) >= 0 || detail.IndexOf("connection reset", StringComparison.OrdinalIgnoreCase) >= 0 || detail.IndexOf("temporary failure", StringComparison.OrdinalIgnoreCase) >= 0) throw new TimeoutException(detail);
+                throw new IOException(String.IsNullOrWhiteSpace(detail) ? "yt-dlp exited with code " + process.ExitCode + "." : detail);
+            }
+        }
+        if (String.IsNullOrWhiteSpace(finalPath) || !File.Exists(finalPath))
+        {
+            string expected = stem + "." + SafeExtension(item.MediaExtension);
+            if (File.Exists(expected)) finalPath = expected;
+        }
+        if (String.IsNullOrWhiteSpace(finalPath) || !File.Exists(finalPath)) throw new IOException("yt-dlp finished but the selected output file could not be found.");
+        item.FilePath = Path.GetFullPath(finalPath);
+        item.Filename = Path.GetFileName(item.FilePath);
+        item.Size = new FileInfo(item.FilePath).Length;
+        item.Bytes = item.Size;
+        Interlocked.Exchange(ref item.CurrentSpeed, 0);
+    }
+
+    private static string FindFfmpeg()
+    {
+        try
+        {
+            string besideApp = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ffmpeg.exe");
+            if (File.Exists(besideApp)) return besideApp;
+        }
+        catch (ArgumentException) { }
+        catch (NotSupportedException) { }
+        catch (PathTooLongException) { }
+
+        string pathValue;
+        try { pathValue = Environment.GetEnvironmentVariable("PATH") ?? ""; }
+        catch { return null; }
+        foreach (string rawFolder in pathValue.Split(Path.PathSeparator))
+        {
+            string folder = (rawFolder ?? "").Trim().Trim('"');
+            if (String.IsNullOrWhiteSpace(folder)) continue;
+            try
+            {
+                string candidate = Path.Combine(folder, "ffmpeg.exe");
+                if (File.Exists(candidate)) return candidate;
+            }
+            catch (ArgumentException) { }
+            catch (NotSupportedException) { }
+            catch (PathTooLongException) { }
+            catch (System.Security.SecurityException) { }
+        }
+        return null;
     }
 
     private async Task<GrabResult> InspectLink(string value)
@@ -1180,19 +2235,37 @@ public sealed class NativeMainForm : Form
 
     private void AddSelectedLinks()
     {
+        int added = 0;
         foreach (GrabResult result in results.Where(r => r.Selected && String.IsNullOrEmpty(r.Error)))
         {
-            if (downloads.Any(d => d.Url == result.Url)) continue;
-            downloads.Insert(0, new NativeDownload { Id = Guid.NewGuid().ToString("N"), Url = result.Url, Filename = SafeFileName(result.Filename), Host = result.Host, Folder = "", FilePath = "", Size = result.Size, Bytes = 0, AcceptsRanges = result.Ranges, Status = "queued", Error = "", AddedAt = DateTime.UtcNow.ToString("o"), CompletedRanges = new List<long[]>() });
+            YtFormatChoice format = result.IsYoutube && result.Formats != null ? result.Formats.FirstOrDefault(f => f.Key == result.SelectedFormatKey) : null;
+            if (result.IsYoutube && format == null) continue;
+            if (result.IsYoutube && format.RequiresFfmpeg && FindFfmpeg() == null)
+            {
+                MessageBox.Show(this, "The selected format needs FFmpeg. Install FFmpeg and add ffmpeg.exe to PATH, then restart Fetchflow. Other listed formats can be added without it.", "FFmpeg required", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                continue;
+            }
+            string filename = result.IsYoutube ? SafeFileName(result.Filename + "." + format.Extension) : SafeFileName(result.Filename);
+            if (downloads.Any(d => d.Url == result.Url && (!result.IsYoutube || (d.IsYoutube && d.MediaSelector == format.Selector && d.MediaMode == format.Mode)))) continue;
+            downloads.Insert(0, new NativeDownload { Id = Guid.NewGuid().ToString("N"), Url = result.Url, Filename = filename, Host = result.IsYoutube ? "YouTube" : result.Host, Folder = "", FilePath = "", Size = result.Size, Bytes = 0, AcceptsRanges = result.Ranges, Status = "queued", Error = "", AddedAt = DateTime.UtcNow.ToString("o"), CompletedRanges = new List<long[]>(), IsYoutube = result.IsYoutube, MediaMode = format == null ? "" : format.Mode, MediaSelector = format == null ? "" : format.Selector, MediaExtension = format == null ? "" : format.Extension, MediaAudioQuality = format == null ? "" : format.AudioQuality });
+            added++;
         }
-        SaveState(); RenderDownloads(); tabs.SelectedIndex = 0;
+        if (added > 0)
+        {
+            queueArmed = true;
+            WriteLog("INFO", "Added " + added + " selected link(s) and started the download queue.");
+        }
+        SaveState();
+        if (queueArmed) PumpQueue();
+        RenderDownloads(); tabs.SelectedIndex = 0;
     }
 
     private void RunContextAction(string action)
     {
         NativeDownload item = downloads.FirstOrDefault(d => d.Id == contextDownloadId);
         if (item == null) return;
-        if (action == "pause") Pause(item);
+        if (action == "download-now") DownloadNow(item);
+        else if (action == "pause") Pause(item);
         else if (action == "resume") Resume(item);
         else if (action == "remove") RemoveItems(new[] { item }, false);
         else if (action == "delete") RemoveItems(new[] { item }, true);
@@ -1201,30 +2274,46 @@ public sealed class NativeMainForm : Form
     private void Pause(NativeDownload item)
     {
         CancellationTokenSource token;
-        if (transfers.TryGetValue(item.Id, out token)) { item.Status = "paused"; token.Cancel(); }
-        else if (item.Status == "queued") item.Status = "paused";
+        if (transfers.TryGetValue(item.Id, out token)) { queueArmed = true; item.Status = "paused"; token.Cancel(); }
+        else if (item.Status == "queued" || item.Status == "retrying") { item.Status = "paused"; item.RetryAt = ""; item.Error = ""; }
         SaveState(); RenderDownloads();
+        if (queueArmed) PumpQueue();
     }
 
     private void Resume(NativeDownload item)
     {
         if (item.Status != "paused" && item.Status != "error") return;
-        item.Status = "queued"; item.Error = ""; SaveState();
-        if (queueArmed) PumpQueue();
-        else StartOne(item);
+        item.Status = "queued"; item.Error = ""; item.RetryAt = ""; item.RetryCount = 0; queueArmed = true; SaveState();
+        PumpQueue();
         RenderDownloads();
     }
 
-    private void StartOne(NativeDownload item)
+    private void DownloadNow(NativeDownload item)
+    {
+        if (item.Status != "queued" && item.Status != "paused" && item.Status != "error") return;
+        item.Status = "queued"; item.Error = ""; item.RetryAt = ""; item.RetryCount = 0;
+        queueArmed = true;
+        if (StartOne(item, true))
+        {
+            SaveState();
+            RenderDownloads();
+        }
+    }
+
+    private bool StartOne(NativeDownload item) { return StartOne(item, false); }
+
+    private bool StartOne(NativeDownload item, bool downloadNow)
     {
         lock (schedulerLock)
         {
-            if (running.Count >= settings.Concurrency || (runningHosts.ContainsKey(item.Host) && runningHosts[item.Host] >= settings.PerHost)) return;
+            if (closing || running.Contains(item.Id)) return false;
+            if (!downloadNow && (running.Count >= settings.Concurrency || (runningHosts.ContainsKey(item.Host) && runningHosts[item.Host] >= settings.PerHost))) return false;
             item.Status = "downloading"; running.Add(item.Id); AddRunningHost(item.Host, 1);
             transfers[item.Id] = new CancellationTokenSource();
         }
         CancellationToken token = transfers[item.Id].Token;
         Task.Run(() => Transfer(item, token)).ContinueWith(task => { if (!IsDisposed) BeginInvoke((Action)(() => CompleteTransfer(item, task))); });
+        return true;
     }
 
     private async Task ValidateFreshLink(NativeDownload item, string fresh)
@@ -1291,11 +2380,12 @@ public sealed class NativeMainForm : Form
                     MessageBox.Show(this, "The saved file path is outside its download folder; it was not deleted.", "Delete download", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     continue;
                 }
-                TryDelete(final); TryDelete(final + ".fetchflow-part");
+                TryDelete(final); TryDelete(final + ".fetchflow-part"); TryDelete(final + ".part"); TryDelete(final + ".ytdl");
             }
             downloads.Remove(item); selectedIds.Remove(item.Id);
         }
         SaveState(); RenderDownloads();
+        PumpQueue();
     }
 
     private static void TryDelete(string path) { try { if (File.Exists(path)) File.Delete(path); } catch { } }
@@ -1356,10 +2446,27 @@ public sealed class NativeMainForm : Form
 
     private static string SafeFileName(string name)
     {
-        name = Path.GetFileName((name ?? "download").Replace('/', '_').Replace('\\', '_'));
-        foreach (char invalid in Path.GetInvalidFileNameChars()) name = name.Replace(invalid, '_');
-        name = name.Trim().TrimEnd('.');
-        return String.IsNullOrWhiteSpace(name) ? "download" : name;
+        // Do not call Path.GetFileName on untrusted titles: .NET Framework can
+        // throw on characters such as ':' before we have a chance to sanitize them.
+        name = (name ?? "download").Replace('/', '_').Replace('\\', '_');
+        // Apply Windows rules explicitly too, so names are safe even if this code
+        // is built or exercised on a platform with a different invalid-char set.
+        const string windowsInvalid = "<>:\"|?*";
+        char[] invalidChars = Path.GetInvalidFileNameChars().Concat(windowsInvalid.ToCharArray()).ToArray();
+        name = new string(name.Select(ch => Char.IsControl(ch) || invalidChars.Contains(ch) ? '_' : ch).ToArray());
+        name = name.Trim().TrimEnd('.', ' ');
+
+        string extension = Path.GetExtension(name);
+        string stem = Path.GetFileNameWithoutExtension(name).TrimEnd('.', ' ');
+        if (String.IsNullOrWhiteSpace(stem)) stem = "download";
+        // Keep the full destination comfortably below Windows path component limits.
+        int maxStemLength = Math.Max(1, 120 - extension.Length);
+        if (stem.Length > maxStemLength) stem = stem.Substring(0, maxStemLength).TrimEnd('.', ' ');
+        if (String.IsNullOrWhiteSpace(stem)) stem = "download";
+
+        string deviceName = stem.TrimEnd('.').ToUpperInvariant();
+        if (Regex.IsMatch(deviceName, @"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$")) stem = "_" + stem;
+        return stem + extension;
     }
 
     private static Uri ValidateUri(string value)
@@ -1424,7 +2531,7 @@ public sealed class NativeMainForm : Form
     private static string StatusText(NativeDownload item)
     {
         if (!String.IsNullOrWhiteSpace(item.Error) && item.Status == "error") return "Failed: " + item.Error;
-        return item.Status == "downloading" ? "Downloading" : item.Status == "finished" ? "Completed" : item.Status == "paused" ? "Paused" : item.Status == "error" ? "Failed" : "Queued";
+        return item.Status == "downloading" ? "Downloading" : item.Status == "retrying" ? "Retrying · " + item.Error : item.Status == "finished" ? "Completed" : item.Status == "paused" ? "Paused" : item.Status == "error" ? "Failed" : "Queued";
     }
 
     private static string ProgressText(NativeDownload item)
@@ -1453,3 +2560,4 @@ public sealed class NativeMainForm : Form
         }
     }
 }
+

@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Fetchflow Download Catcher",
+  "version": "1.10.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAlyIkEb1UIUcfk9jI+q6vWzTsrLQgiww7Ie1ZPUKS4YnuaSFYY7Hvkp+PcJyKO/Vgv/Xa1YVYfHou+/HtPEQpJOeQIsJnSfVXkDoYyPW0SUNYnGvQvz+n106J+hW4YPYKtHlwjcvVtmTTxhmOafAnWaG6TIVuggFoc7QV/TDCCq9AtzPib//qAG/07YcGvPRMRcgS5lLDiRcpOJQ1RdYzfZGZdaqCXBVWK0Pw/Lq0QXLd7PfnypGgeP6ur9FeI7W2OLT+LJcDcBoluR2akxmUvZ5GbjWQxg4vUPx8uANUI9BvJvFfJuA4/HMXl5A7GZDwkiJMAxWt9p5Ch5g4Oa5hkwIDAQAB",
+  "description": "Route Chrome downloads through Fetchflow with a save-path confirmation.",
+  "permissions": ["downloads", "contextMenus", "storage", "nativeMessaging"],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [{
+    "matches": ["http://*/*", "https://*/*"],
+    "js": ["click-capture.js", "video-overlay.js"],
+    "run_at": "document_start",
+    "all_frames": true
+  }],
+  "action": {
+    "default_title": "Fetchflow Download Catcher",
+    "default_popup": "popup.html",
+    "default_icon": { "16": "icon.png", "48": "icon.png" }
+  },
+  "icons": { "16": "icon.png", "48": "icon.png", "128": "icon.png" }
+}
+
