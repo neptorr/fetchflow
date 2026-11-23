@@ -36,11 +36,3 @@ With **Automatically route Chrome downloads to Fetchflow** enabled, recognized f
 
 Settings and the download queue are saved on this device. To resume queued downloads automatically after signing in to Windows, enable **Start with Windows and resume queued downloads at sign-in** in Settings.
 
-## License
-
-Fetchflow is distributed under the [PolyForm Noncommercial License 1.0.0](LICENSE). It allows personal and other noncommercial use; commercial use is not permitted under its terms. Third-party components retain their own licenses; see the notices installed with Fetchflow.
-
-## Download limits
-
-Fetchflow supports direct HTTP/HTTPS file links and public YouTube videos. Links that require a website login, an authenticated browser session, or a site-specific resolver may not be downloadable. Link inspection contacts the URL’s server when you choose **Check links**; transfers begin only when you start the queue.
-
